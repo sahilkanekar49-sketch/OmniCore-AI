@@ -232,3 +232,55 @@ test("approved browser origins receive scoped CORS headers", async () => {
   }), makeEnv({ CORS_ALLOWED_ORIGINS: "https://app.example" }));
   assert.equal(response.headers.get("access-control-allow-origin"), "https://app.example");
 });
+
+test("admin key listing returns active metadata only and never exposes key material", async () => {
+  const rows = [
+    { id: "active-1", name: "production client", created_at: "2026-11-07T08:00:00.000Z" },
+    { id: "active-2", name: "staging client", created_at: "2026-11-06T08:00:00.000Z" },
+  ];
+  const env = makeEnv({
+    OMNICORE_ADMIN_KEY: "admin-secret",
+    DB: {
+      prepare(sql: string) {
+        return {
+          bind(..._values: unknown[]) {
+            return {
+              async first() {
+                if (sql.includes("rate_limit_windows")) return { request_count: 1 };
+                return null;
+              },
+              async all() {
+                assert.match(sql, /SELECT id, name, created_at FROM api_keys/);
+                assert.match(sql, /revoked_at IS NULL/);
+                return { results: rows };
+              },
+              async run() { return { success: true, meta: { changes: 0 } }; },
+            };
+          },
+        };
+      },
+    },
+  });
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/keys", {
+    method: "GET",
+    headers: { authorization: "Bearer admin-secret" },
+  }), env);
+  assert.equal(response.status, 200);
+  const body = await response.json() as { object: string; data: Array<Record<string, unknown>> };
+  assert.equal(body.object, "list");
+  assert.deepEqual(body.data, rows);
+  const serialized = JSON.stringify(body);
+  assert.equal(serialized.includes("key_hash"), false);
+  assert.equal(serialized.includes("api_key"), false);
+  assert.equal(serialized.includes("oc_live_"), false);
+  assert.equal(serialized.includes("admin-secret"), false);
+});
+
+test("API key listing rejects non-admin credentials", async () => {
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/keys", {
+    method: "GET",
+    headers: { authorization: "Bearer test-secret-key" },
+  }), makeEnv());
+  assert.equal(response.status, 401);
+});
+
