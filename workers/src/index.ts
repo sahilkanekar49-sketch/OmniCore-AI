@@ -16,6 +16,7 @@ export interface Env {
 }
 
 type ApiPrincipal = { id: string; keyHash: string; name: string; admin: boolean };
+type AuthUnavailable = { unavailable: true };
 type ChatMessage = { role: string; content: unknown };
 type ChatRequest = {
   model?: string;
@@ -55,7 +56,7 @@ function constantTimeEqual(a: string, b: string): boolean {
   return difference === 0;
 }
 
-async function authenticate(request: Request, env: Env): Promise<ApiPrincipal | null> {
+async function authenticate(request: Request, env: Env): Promise<ApiPrincipal | null | AuthUnavailable> {
   const header = request.headers.get("authorization") || "";
   const parts = header.trim().split(" ").filter(Boolean);
   if (parts.length !== 2 || parts[0].toLowerCase() !== "bearer") return null;
@@ -75,7 +76,7 @@ async function authenticate(request: Request, env: Env): Promise<ApiPrincipal | 
     return { id: row.id, keyHash: row.key_hash, name: row.name, admin: false };
   } catch (error) {
     console.error("API-key lookup failed", error);
-    return null;
+    return { unavailable: true };
   }
 }
 
@@ -316,6 +317,7 @@ async function recordProviderResult(env: Env, provider: string, success: boolean
 
 async function handleChat(request: Request, env: Env): Promise<Response> {
   const principal = await authenticate(request, env);
+  if (principal && "unavailable" in principal) return json(openAIError("Authentication service is temporarily unavailable.", "server_error", "authentication_unavailable"), 503, { "retry-after": "5" });
   if (!principal) return json(openAIError("Invalid API key", "authentication_error", "invalid_api_key"), 401, { "www-authenticate": "Bearer" });
   const limited = await enforceRateLimit(request, env, principal.keyHash);
   if (limited) return limited;
@@ -391,6 +393,7 @@ export default {
     }
     if (url.pathname === "/v1/models" && request.method === "GET") {
       const principal = await authenticate(request, env);
+      if (principal && "unavailable" in principal) return json(openAIError("Authentication service is temporarily unavailable.", "server_error", "authentication_unavailable"), 503, { ...cors, "retry-after": "5" });
       if (!principal) return json(openAIError("Invalid API key", "authentication_error", "invalid_api_key"), 401, { ...cors, "www-authenticate": "Bearer" });
       const limited = await enforceRateLimit(request, env, principal.keyHash);
       if (limited) return limited;
