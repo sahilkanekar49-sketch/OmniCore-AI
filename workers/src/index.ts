@@ -57,7 +57,7 @@ function constantTimeEqual(a: string, b: string): boolean {
 
 async function authenticate(request: Request, env: Env): Promise<ApiPrincipal | null> {
   const header = request.headers.get("authorization") || "";
-  const match = /^Bearer ([^\\s]+)$/i.exec(header);
+  const match = /^Bearer ([^\s]+)$/i.exec(header);
   if (!match) return null;
   const suppliedHash = await sha256(match[1]);
   if (env.OMNICORE_ADMIN_KEY && constantTimeEqual(suppliedHash, await sha256(env.OMNICORE_ADMIN_KEY))) {
@@ -332,10 +332,10 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
       if (!response.ok) {
         const detail = (await response.text()).slice(0, 300);
         failures.push(provider + ": HTTP " + response.status + " " + detail);
-        await recordProviderResult(env, provider, false);
         if (!shouldFallback(response.status)) {
           return json(openAIError("Provider rejected the request (" + provider + ").", "invalid_request_error", "provider_request_rejected"), response.status);
         }
+        await recordProviderResult(env, provider, false);
         continue;
       }
       await recordProviderResult(env, provider, true);
@@ -366,7 +366,7 @@ export default {
       return json(modelList(env), 200, cors);
     }
     if (url.pathname === "/v1/keys" && request.method === "POST") return issueApiKey(request, env);
-    const revokeMatch = /^\\/v1\\/keys\\/([0-9a-f-]+)$/.exec(url.pathname);
+    const revokeMatch = /^\/v1\/keys\/([0-9a-f-]+)$/.exec(url.pathname);
     if (revokeMatch && request.method === "DELETE") return revokeApiKey(request, env, revokeMatch[1]);
     if (url.pathname === "/v1/chat/completions" && request.method === "POST") {
       const response = await handleChat(request, env);
