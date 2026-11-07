@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 jobs:
-  worker-dry-run:
+  worker-tests-and-dry-run:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -27,5 +27,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Run Worker authentication, fallback and rate-limit tests
+        run: node --experimental-strip-types --test src/index.test.ts
       - name: Validate Wrangler configuration and build bundle (no deployment)
         run: npx --yes wrangler@4 deploy --dry-run --outdir .wrangler/deploy
