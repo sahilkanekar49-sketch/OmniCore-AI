@@ -1,0 +1,31 @@
+name: OmniCore Worker validation
+
+on:
+  push:
+    branches: [cloudflare-adaptation]
+    paths:
+      - "workers/**"
+      - ".github/workflows/omnicore-worker.yml"
+  pull_request:
+    branches: [main, "release/**"]
+    paths:
+      - "workers/**"
+      - ".github/workflows/omnicore-worker.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  worker-dry-run:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Validate Wrangler configuration and build bundle (no deployment)
+        run: npx --yes wrangler@4 deploy --dry-run --outdir .wrangler/deploy
