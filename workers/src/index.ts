@@ -116,7 +116,11 @@ async function issueApiKey(request: Request, env: Env): Promise<Response> {
   const adminLimit = await enforceRateLimit(request, env, await sha256(env.OMNICORE_ADMIN_KEY || ""));
   if (adminLimit) return adminLimit;
   let input: { name?: string; expires_in_days?: number };
-  try { input = await request.json() as { name?: string; expires_in_days?: number }; } catch {
+  try {
+    const raw = await readBodyWithinLimit(request, 4_096);
+    if (raw === null) return json(openAIError("Key-management request body exceeds 4 KiB", "invalid_request_error", "body_too_large"), 413);
+    input = JSON.parse(raw) as { name?: string; expires_in_days?: number };
+  } catch {
     return json(openAIError("Valid JSON body required", "invalid_request_error", "invalid_json"), 400);
   }
   const name = String(input.name || "").trim().slice(0, 80);
@@ -148,7 +152,11 @@ async function rotateApiKey(request: Request, env: Env, oldId: string): Promise<
   const adminLimit = await enforceRateLimit(request, env, await sha256(env.OMNICORE_ADMIN_KEY || ""));
   if (adminLimit) return adminLimit;
   let input: { expires_in_days?: number } = {};
-  try { input = await request.json() as { expires_in_days?: number }; } catch {
+  try {
+    const raw = await readBodyWithinLimit(request, 4_096);
+    if (raw === null) return json(openAIError("Key-management request body exceeds 4 KiB", "invalid_request_error", "body_too_large"), 413);
+    input = raw ? JSON.parse(raw) as { expires_in_days?: number } : {};
+  } catch {
     return json(openAIError("Valid JSON body required", "invalid_request_error", "invalid_json"), 400);
   }
   const expiresInDays = input.expires_in_days === undefined ? 90 : Number(input.expires_in_days);
@@ -219,10 +227,15 @@ async function revokeApiKey(request: Request, env: Env, id: string): Promise<Res
   if (!(await requireAdmin(request, env))) return json(openAIError("Admin authentication required", "authentication_error", "admin_required"), 401);
   const adminLimit = await enforceRateLimit(request, env, await sha256(env.OMNICORE_ADMIN_KEY || ""));
   if (adminLimit) return adminLimit;
-  const result = await env.DB.prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
-    .bind(new Date().toISOString(), id).run();
-  if (!result.meta?.changes) return json(openAIError("API key not found or already revoked", "invalid_request_error", "key_not_found"), 404);
-  return json({ id, revoked: true });
+  try {
+    const result = await env.DB.prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+      .bind(new Date().toISOString(), id).run();
+    if (!result.meta?.changes) return json(openAIError("API key not found or already revoked", "invalid_request_error", "key_not_found"), 404);
+    return json({ id, revoked: true });
+  } catch (error) {
+    console.error("API-key revocation failed", error);
+    return json(openAIError("Could not revoke API key", "server_error", "key_revocation_failed"), 503, { "retry-after": "5" });
+  }
 }
 
 function configuredProviders(env: Env): string[] {
