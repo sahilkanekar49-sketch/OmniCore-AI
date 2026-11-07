@@ -4,19 +4,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
+const migrations = await readD1Migrations(path.join(root, "migrations"));
 
 export default defineConfig({
   plugins: [
-    cloudflareTest(async () => ({
+    cloudflareTest({
+      wrangler: { configPath: path.join(root, "wrangler.toml") },
       miniflare: {
         bindings: {
-          TEST_MIGRATIONS: await readD1Migrations(path.join(root, "migrations")),
+          TEST_MIGRATIONS: migrations,
           OMNICORE_ADMIN_KEY: "local-integration-admin",
           RATE_LIMIT_REQUESTS: "3",
           RATE_LIMIT_WINDOW_SECONDS: "60",
         },
       },
-    })),
+    }),
   ],
   test: {
     include: ["src/**/*.integration.test.ts"],
