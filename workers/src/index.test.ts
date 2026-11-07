@@ -317,3 +317,23 @@ test("chat endpoint returns 503 when managed-key lookup database is unavailable"
   assert.equal(body.error.code, "authentication_unavailable");
 });
 
+test("admin key listing returns 503 when D1 is unavailable", async () => {
+  const env = makeEnv({
+    OMNICORE_ADMIN_KEY: "admin-secret",
+    DB: {
+      prepare() {
+        return { bind() { return {
+          async first() { return { request_count: 1 }; },
+          async all() { throw new Error("D1 unavailable"); },
+        }; } };
+      },
+    },
+  });
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/keys", {
+    headers: { authorization: "Bearer admin-secret" },
+  }), env);
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("retry-after"), "5");
+  const body = await response.json() as { error: { code: string } };
+  assert.equal(body.error.code, "key_listing_unavailable");
+});
