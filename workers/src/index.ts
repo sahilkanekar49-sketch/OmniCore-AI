@@ -70,8 +70,8 @@ async function authenticate(request: Request, env: Env): Promise<ApiPrincipal | 
   }
   try {
     const row = await env.DB.prepare(
-      "SELECT id, key_hash, name FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1",
-    ).bind(suppliedHash).first<{ id: string; key_hash: string; name: string }>();
+      "SELECT id, key_hash, name FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) LIMIT 1",
+    ).bind(suppliedHash, new Date().toISOString()).first<{ id: string; key_hash: string; name: string }>();
     if (!row) return null;
     return { id: row.id, keyHash: row.key_hash, name: row.name, admin: false };
   } catch (error) {
@@ -97,17 +97,58 @@ async function issueApiKey(request: Request, env: Env): Promise<Response> {
   }
   const name = String(input.name || "").trim().slice(0, 80);
   if (!name) return json(openAIError("Key name is required", "invalid_request_error", "invalid_key_name"), 400);
+  const expiresInDays = input.expires_in_days === undefined ? 90 : Number(input.expires_in_days);
+  if (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > 365) {
+    return json(openAIError("expires_in_days must be an integer from 1 to 365", "invalid_request_error", "invalid_key_expiry"), 400);
+  }
   const id = crypto.randomUUID();
   const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
   const token = "oc_live_" + [...tokenBytes].map((b) => b.toString(16).padStart(2, "0")).join("");
   const hash = await sha256(token);
+  const createdAt = new Date();
+  const createdAtIso = createdAt.toISOString();
+  const expiresAt = new Date(createdAt.getTime() + expiresInDays * 86_400_000).toISOString();
   try {
-    await env.DB.prepare("INSERT INTO api_keys (id, key_hash, name, created_at) VALUES (?, ?, ?, ?)")
-      .bind(id, hash, name, new Date().toISOString()).run();
-    return json({ id, name, api_key: token, created_at: new Date().toISOString(), warning: "Store this key securely; it will not be shown again." }, 201);
+    await env.DB.prepare("INSERT INTO api_keys (id, key_hash, name, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(id, hash, name, createdAtIso, expiresAt).run();
+    return json({ id, name, api_key: token, created_at: createdAtIso, expires_at: expiresAt, warning: "Store this key securely; it will not be shown again." }, 201);
   } catch (error) {
     console.error("API-key creation failed", error);
     return json(openAIError("Could not create API key", "server_error", "key_creation_failed"), 503);
+  }
+}
+
+
+async function rotateApiKey(request: Request, env: Env, oldId: string): Promise<Response> {
+  if (!(await requireAdmin(request, env))) return json(openAIError("Admin authentication required", "authentication_error", "admin_required"), 401);
+  const adminLimit = await enforceRateLimit(request, env, await sha256(env.OMNICORE_ADMIN_KEY || ""));
+  if (adminLimit) return adminLimit;
+  let input: { expires_in_days?: number } = {};
+  try { input = await request.json() as { expires_in_days?: number }; } catch {
+    return json(openAIError("Valid JSON body required", "invalid_request_error", "invalid_json"), 400);
+  }
+  const expiresInDays = input.expires_in_days === undefined ? 90 : Number(input.expires_in_days);
+  if (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > 365) {
+    return json(openAIError("expires_in_days must be an integer from 1 to 365", "invalid_request_error", "invalid_key_expiry"), 400);
+  }
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const expiresAt = new Date(now.getTime() + expiresInDays * 86_400_000).toISOString();
+  const id = crypto.randomUUID();
+  const token = "oc_live_" + [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const hash = await sha256(token);
+  try {
+    const results = await env.DB.batch([
+      env.DB.prepare("INSERT INTO api_keys (id, key_hash, name, created_at, expires_at) SELECT ?, ?, name, ?, ? FROM api_keys WHERE id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)")
+        .bind(id, hash, nowIso, expiresAt, oldId, nowIso),
+      env.DB.prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+        .bind(nowIso, oldId),
+    ]);
+    if (!results[0]?.meta?.changes) return json(openAIError("API key not found, expired, or already rotated", "invalid_request_error", "key_not_found"), 404);
+    return json({ id, replaces: oldId, api_key: token, created_at: nowIso, expires_at: expiresAt, warning: "Store this key securely; it will not be shown again. The previous key has been revoked." }, 201);
+  } catch (error) {
+    console.error("API-key rotation failed", error);
+    return json(openAIError("Could not rotate API key", "server_error", "key_rotation_failed"), 503, { "retry-after": "5" });
   }
 }
 
@@ -117,8 +158,8 @@ async function listApiKeys(request: Request, env: Env): Promise<Response> {
   if (adminLimit) return adminLimit;
   try {
     const result = await env.DB.prepare(
-      "SELECT id, name, created_at FROM api_keys WHERE revoked_at IS NULL ORDER BY created_at DESC LIMIT 500",
-    ).all<{ id: string; name: string; created_at: string }>();
+      "SELECT id, name, created_at, expires_at FROM api_keys WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC LIMIT 500",
+    ).bind(new Date().toISOString()).all<{ id: string; name: string; created_at: string; expires_at: string | null }>();
     return json({ object: "list", data: result.results || [] });
   } catch (error) {
     console.error("API-key listing failed", error);
@@ -406,6 +447,8 @@ export default {
     }
     if (url.pathname === "/v1/keys" && request.method === "POST") return issueApiKey(request, env);
     if (url.pathname === "/v1/keys" && request.method === "GET") return listApiKeys(request, env);
+    const rotateMatch = url.pathname.match(new RegExp("^/v1/keys/([0-9a-f-]+)/rotate$"));
+    if (rotateMatch && request.method === "POST") return rotateApiKey(request, env, rotateMatch[1]);
     const revokeMatch = url.pathname.match(new RegExp("^/v1/keys/([0-9a-f-]+)$"));
     if (revokeMatch && request.method === "DELETE") return revokeApiKey(request, env, revokeMatch[1]);
     if (url.pathname === "/v1/chat/completions" && request.method === "POST") {
