@@ -249,13 +249,13 @@ test("admin key listing returns active metadata only and never exposes key mater
                 if (sql.includes("rate_limit_windows")) return { request_count: 1 };
                 return null;
               },
-              async all() {
-                assert.match(sql, /SELECT id, name, created_at FROM api_keys/);
-                assert.match(sql, /revoked_at IS NULL/);
-                return { results: rows };
-              },
               async run() { return { success: true, meta: { changes: 0 } }; },
             };
+          },
+          async all() {
+            assert.match(sql, /SELECT id, name, created_at FROM api_keys/);
+            assert.match(sql, /revoked_at IS NULL/);
+            return { results: rows };
           },
         };
       },
@@ -343,13 +343,13 @@ test("admin key listing returns an empty list when D1 has no active keys", async
     OMNICORE_ADMIN_KEY: "admin-secret",
     DB: {
       prepare(sql: string) {
-        return { bind() { return {
-          async first() { return { request_count: 1 }; },
+        return {
+          bind() { return { async first() { return { request_count: 1 }; } }; },
           async all() {
             assert.match(sql, /revoked_at IS NULL/);
             return { results: [] };
           },
-        }; } };
+        };
       },
     },
   });
