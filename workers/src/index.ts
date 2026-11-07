@@ -57,9 +57,9 @@ function constantTimeEqual(a: string, b: string): boolean {
 
 async function authenticate(request: Request, env: Env): Promise<ApiPrincipal | null> {
   const header = request.headers.get("authorization") || "";
-  const match = /^Bearer ([^\s]+)$/i.exec(header);
-  if (!match) return null;
-  const suppliedHash = await sha256(match[1]);
+  const parts = header.trim().split(/\\s+/);
+  if (parts.length !== 2 || parts[0].toLowerCase() !== "bearer") return null;
+  const suppliedHash = await sha256(parts[1]);
   if (env.OMNICORE_ADMIN_KEY && constantTimeEqual(suppliedHash, await sha256(env.OMNICORE_ADMIN_KEY))) {
     return { id: "admin", keyHash: suppliedHash, name: "admin", admin: true };
   }
@@ -81,9 +81,9 @@ async function authenticate(request: Request, env: Env): Promise<ApiPrincipal | 
 
 async function requireAdmin(request: Request, env: Env): Promise<boolean> {
   const header = request.headers.get("authorization") || "";
-  const match = /^Bearer ([^\\s]+)$/i.exec(header);
-  return Boolean(match && env.OMNICORE_ADMIN_KEY &&
-    constantTimeEqual(await sha256(match[1]), await sha256(env.OMNICORE_ADMIN_KEY)));
+  const parts = header.trim().split(/\\s+/);
+  return Boolean(parts.length === 2 && parts[0].toLowerCase() === "bearer" && env.OMNICORE_ADMIN_KEY &&
+    constantTimeEqual(await sha256(parts[1]), await sha256(env.OMNICORE_ADMIN_KEY)));
 }
 
 async function issueApiKey(request: Request, env: Env): Promise<Response> {
@@ -366,7 +366,7 @@ export default {
       return json(modelList(env), 200, cors);
     }
     if (url.pathname === "/v1/keys" && request.method === "POST") return issueApiKey(request, env);
-    const revokeMatch = /^\/v1\/keys\/([0-9a-f-]+)$/.exec(url.pathname);
+    const revokeMatch = url.pathname.match(new RegExp("^/v1/keys/([0-9a-f-]+)$"));
     if (revokeMatch && request.method === "DELETE") return revokeApiKey(request, env, revokeMatch[1]);
     if (url.pathname === "/v1/chat/completions" && request.method === "POST") {
       const response = await handleChat(request, env);
