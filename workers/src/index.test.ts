@@ -449,3 +449,31 @@ test("key rotation issues a replacement and atomically revokes the old key", asy
   assert.match(batchSql[0], /INSERT INTO api_keys .* SELECT .* FROM api_keys WHERE id = \?/);
   assert.match(batchSql[1], /UPDATE api_keys SET revoked_at/);
 });
+
+test("provider health endpoint is admin-only", async () => {
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/providers/health"), makeEnv());
+  assert.equal(response.status, 401);
+});
+
+test("admin provider health reports circuit state without exposing credentials", async () => {
+  const env = makeEnv({ OMNICORE_ADMIN_KEY: "admin-secret", DB: {
+    prepare(sql: string) { return { bind(..._values: unknown[]) { return {
+      async first() { return { request_count: 1 }; },
+      async all() { assert.match(sql, /provider_circuits/); return { results: [{ provider: "openai", failure_count: 3, opened_until: Math.floor(Date.now() / 1000) + 60, last_failure_at: 123 }] }; },
+    }; } }; },
+  } });
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/providers/health", { headers: { authorization: "Bearer admin-secret" } }), env);
+  assert.equal(response.status, 200);
+  const body = await response.json() as { data: Array<{ provider: string; circuit: string }> };
+  assert.equal(body.data.find((item) => item.provider === "openai")?.circuit, "open");
+  assert.equal(JSON.stringify(body).includes("openai-test"), false);
+});
+
+test("provider health returns 503 when circuit storage is unavailable", async () => {
+  const env = makeEnv({ OMNICORE_ADMIN_KEY: "admin-secret", DB: {
+    prepare(sql: string) { return { bind() { return { async first() { return { request_count: 1 }; }, async all() { throw new Error("D1 unavailable"); } }; } }; },
+  } });
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/providers/health", { headers: { authorization: "Bearer admin-secret" } }), env);
+  assert.equal(response.status, 503);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "provider_health_unavailable");
+});
