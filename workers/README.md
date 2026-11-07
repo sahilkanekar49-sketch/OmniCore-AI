@@ -65,7 +65,7 @@ From this directory with Node 24+:
 
 ```sh
 node --experimental-strip-types --test src/index.test.ts
-npm install --no-save --no-package-lock vitest@^4.1.0 @cloudflare/vitest-plugin
+npm install --no-save --no-package-lock
 npx vitest run --config vitest.config.ts
 npx wrangler types
 npx wrangler deploy --dry-run
