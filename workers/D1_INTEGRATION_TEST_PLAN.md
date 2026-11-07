@@ -4,7 +4,7 @@
 
 1. **Fast unit tests** (`src/index.test.ts`): mocked D1 and fetch. These prove request handling, policy branches, and atomic SQL shape, but do not prove D1 runtime behavior.
 2. **Migration compatibility**: CI applies all five SQL migrations to in-memory SQLite, checks the resulting schema, and verifies that existing managed keys receive a 90-day expiry backfill.
-3. **Worker + D1 integration** (`src/d1.integration.test.ts`): Cloudflare Workers Vitest plugin runs the actual Worker module in the Workers runtime with a local Miniflare D1 binding. The suite applies the real migration files and exercises persisted key creation, hash-only storage, key rotation/revocation, and concurrent rate-limit requests through HTTP handlers.
+3. **Worker + D1 integration** (`src/d1.integration.test.ts`): Cloudflare Workers Vitest plugin runs the actual Worker module in the Workers runtime with a local Miniflare D1 binding. It uses `wrangler.test.toml`, a D1-only test config that deliberately omits the Workers AI binding because AI bindings require remote service access and cannot be simulated locally. The suite applies the real migration files and exercises persisted key creation, hash-only storage, key rotation/revocation, and concurrent rate-limit requests through HTTP handlers.
 4. **Remote D1 staging**: not enabled. A separately approved staging database is required to validate Cloudflare-hosted D1 behavior, remote concurrency, operational limits, backups, and migration rollback. Do not provision a database or apply remote migrations as part of ordinary CI.
 
 ## Running locally
