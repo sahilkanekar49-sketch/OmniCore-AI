@@ -7,6 +7,7 @@ A separate Cloudflare-native edition. The upstream Next.js/Node application and 
 - `GET /health` — public health check.
 - `GET /v1/models` — OpenAI-style model list; requires a bearer API key.
 - `POST /v1/chat/completions` — OpenAI-compatible chat endpoint with ordered provider fallback.
+- `GET /v1/keys` — list active key metadata (never plaintext keys); requires the admin bearer key.
 - `POST /v1/keys` — create a managed API key; requires the admin bearer key.
 - `DELETE /v1/keys/{id}` — revoke a managed API key; requires the admin bearer key.
 
@@ -50,7 +51,7 @@ The upstream fetch deadline is 25 seconds. A failure after streaming response he
 
 ## D1 and migrations
 
-Apply migrations in order: `0001_init.sql`, `0002_rate_limits.sql`, `0003_identity_and_circuit_breakers.sql`. D1 stores usage metadata, hashed API keys, rate-limit counters, and circuit state. Provider secrets and admin credentials must remain Worker secrets, never D1 or Git.
+Apply migrations in order: `0001_init.sql`, `0002_rate_limits.sql`, `0003_identity_and_circuit_breakers.sql`, `0004_usage_key_attribution.sql`. D1 stores usage metadata (including API-key attribution), hashed API keys, rate-limit counters, and circuit state. Provider secrets and admin credentials must remain Worker secrets, never D1 or Git.
 
 Old rate-limit windows and revoked key records are retained for audit and storage control; scheduled retention cleanup is not enabled yet.
 
