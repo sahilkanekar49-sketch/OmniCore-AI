@@ -337,3 +337,25 @@ test("admin key listing returns 503 when D1 is unavailable", async () => {
   const body = await response.json() as { error: { code: string } };
   assert.equal(body.error.code, "key_listing_unavailable");
 });
+
+test("admin key listing returns an empty list when D1 has no active keys", async () => {
+  const env = makeEnv({
+    OMNICORE_ADMIN_KEY: "admin-secret",
+    DB: {
+      prepare(sql: string) {
+        return { bind() { return {
+          async first() { return { request_count: 1 }; },
+          async all() {
+            assert.match(sql, /revoked_at IS NULL/);
+            return { results: [] };
+          },
+        }; } };
+      },
+    },
+  });
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/keys", {
+    headers: { authorization: "Bearer admin-secret" },
+  }), env);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { object: "list", data: [] });
+});
