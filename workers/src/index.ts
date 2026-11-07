@@ -70,7 +70,7 @@ function configuredProviders(env: Env): string[] {
   return [...ordered, ...[...available].filter((v) => !ordered.includes(v))];
 }
 
-function corsHeaders(request: Request, env: Env): HeadersInit {
+function corsHeaders(request: Request, env: Env): Record<string, string> {
   const origin = request.headers.get("origin");
   const allowed = (env.CORS_ALLOWED_ORIGINS || "").split(",").map((v) => v.trim()).filter(Boolean);
   if (!origin || !allowed.includes(origin)) return { vary: "Origin" };
