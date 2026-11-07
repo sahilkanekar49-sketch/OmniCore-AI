@@ -362,6 +362,20 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
 }
 
 export default {
+
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil((async () => {
+      const now = Math.floor(Date.now() / 1000);
+      const results = await Promise.all([
+        env.DB.prepare("DELETE FROM rate_limit_windows WHERE window_start < ?").bind(now - 172800).run(),
+        env.DB.prepare("DELETE FROM provider_circuits WHERE updated_at < ? AND opened_until < ?").bind(now - 86400, now).run(),
+      ]);
+      console.log("OmniCore scheduled cleanup completed", {
+        rateLimitWindowsDeleted: results[0].meta?.changes || 0,
+        circuitRowsDeleted: results[1].meta?.changes || 0,
+      });
+    })());
+  },
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const cors = corsHeaders(request, env);
