@@ -39,8 +39,14 @@ jobs:
           migrations = sorted(pathlib.Path("migrations").glob("*.sql"))
           assert len(migrations) >= 5, "Expected all D1 migrations"
           for migration in migrations:
+              if migration.name == "0005_api_key_expiry.sql":
+                  db.execute("INSERT INTO api_keys (id, key_hash, name, created_at) VALUES (?, ?, ?, ?)", ("legacy", "legacy-hash", "legacy key", "2026-01-01T00:00:00.000Z"))
               db.executescript(migration.read_text(encoding="utf-8"))
               print(f"Applied {migration.name}")
+
+          legacy_expiry = db.execute("SELECT expires_at FROM api_keys WHERE id = ?", ("legacy",)).fetchone()[0]
+          assert legacy_expiry == "2026-04-01T00:00:00.000Z", f"Legacy key expiry backfill incorrect: {legacy_expiry}"
+          print("Legacy managed-key expiry backfill validation passed")
 
           required = {
               "api_keys": {"id", "key_hash", "name", "created_at", "revoked_at", "expires_at"},
