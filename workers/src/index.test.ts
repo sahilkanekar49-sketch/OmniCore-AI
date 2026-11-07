@@ -41,7 +41,7 @@ function chatRequest(key = "test-secret-key") {
 
 
 test("admin can issue a managed key and that key authenticates", async () => {
-  const keys = new Map<string, { id: string; key_hash: string; name: string }>();
+  const keys = new Map<string, { id: string; key_hash: string; name: string; expires_at: string | null; created_at: string }>();
   const env = makeEnv({
     OMNICORE_ADMIN_KEY: "admin-secret",
     DB: {
@@ -51,7 +51,7 @@ test("admin can issue a managed key and that key authenticates", async () => {
             return {
               async first() {
                 if (sql.includes("SELECT id, key_hash, name FROM api_keys")) {
-                  return [...keys.values()].find((key) => key.key_hash === values[0] && !(key as { revoked?: boolean }).revoked) || null;
+                  return [...keys.values()].find((key) => key.key_hash === values[0] && !(key as { revoked?: boolean }).revoked && (!key.expires_at || key.expires_at > String(values[1]))) || null;
                 }
                 if (sql.includes("rate_limit_windows")) return { request_count: 1 };
                 if (sql.includes("provider_circuits")) return null;
@@ -59,7 +59,7 @@ test("admin can issue a managed key and that key authenticates", async () => {
               },
               async run() {
                 if (sql.includes("INSERT INTO api_keys")) {
-                  keys.set(String(values[0]), { id: String(values[0]), key_hash: String(values[1]), name: String(values[2]) });
+                  keys.set(String(values[0]), { id: String(values[0]), key_hash: String(values[1]), name: String(values[2]), created_at: String(values[3]), expires_at: String(values[4]) });
                 }
                 if (sql.includes("UPDATE api_keys")) { const key = keys.get(String(values[1])); if (key) (key as { revoked?: boolean }).revoked = true; }
                 return { success: true, meta: { changes: 1 } };
@@ -235,8 +235,8 @@ test("approved browser origins receive scoped CORS headers", async () => {
 
 test("admin key listing returns active metadata only and never exposes key material", async () => {
   const rows = [
-    { id: "active-1", name: "production client", created_at: "2026-11-07T08:00:00.000Z" },
-    { id: "active-2", name: "staging client", created_at: "2026-11-06T08:00:00.000Z" },
+    { id: "active-1", name: "production client", created_at: "2026-11-07T08:00:00.000Z", expires_at: "2027-02-05T08:00:00.000Z" },
+    { id: "active-2", name: "staging client", created_at: "2026-11-06T08:00:00.000Z", expires_at: null },
   ];
   const env = makeEnv({
     OMNICORE_ADMIN_KEY: "admin-secret",
@@ -253,7 +253,7 @@ test("admin key listing returns active metadata only and never exposes key mater
             };
           },
           async all() {
-            assert.match(sql, /SELECT id, name, created_at FROM api_keys/);
+            assert.match(sql, /SELECT id, name, created_at, expires_at FROM api_keys/);
             assert.match(sql, /revoked_at IS NULL/);
             return { results: rows };
           },
@@ -405,4 +405,30 @@ test("concurrent requests share one atomic per-key rate-limit counter", async ()
   assert.equal(responses.filter((response) => response.status === 200).length, 3);
   assert.equal(responses.filter((response) => response.status === 429).length, 2);
   assert.equal(count, 5);
+});
+
+test("managed API keys are issued with a bounded default expiry", async () => {
+  let inserted: unknown[] = [];
+  const env = makeEnv({ OMNICORE_ADMIN_KEY: "admin-secret", DB: { prepare(_sql: string) { return { bind(...values: unknown[]) { inserted = values; return { async first() { return { request_count: 1 }; }, async run() { return { success: true, meta: { changes: 1 } }; } }; } }; } } });
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/keys", { method: "POST", headers: { authorization: "Bearer admin-secret", "content-type": "application/json" }, body: JSON.stringify({ name: "expiry test" }) }), env);
+  assert.equal(response.status, 201);
+  const body = await response.json() as { expires_at: string };
+  assert.ok(body.expires_at);
+  assert.equal(inserted.length, 5);
+  assert.equal(inserted[4], body.expires_at);
+});
+
+test("managed API key authentication excludes expired credentials in D1 query", async () => {
+  let query = "";
+  const env = makeEnv({ OMNICORE_API_KEY: undefined, DB: { prepare(sql: string) { query = sql; return { bind() { return { async first() { return null; } }; } }; } } });
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/models", { headers: { authorization: "Bearer oc_live_expired" } }), env);
+  assert.equal(response.status, 401);
+  assert.match(query, /expires_at IS NULL OR expires_at >/);
+});
+
+test("key creation rejects invalid expiry windows", async () => {
+  const env = makeEnv({ OMNICORE_ADMIN_KEY: "admin-secret" });
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/keys", { method: "POST", headers: { authorization: "Bearer admin-secret", "content-type": "application/json" }, body: JSON.stringify({ name: "bad expiry", expires_in_days: 9999 }) }), env);
+  assert.equal(response.status, 400);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "invalid_key_expiry");
 });
