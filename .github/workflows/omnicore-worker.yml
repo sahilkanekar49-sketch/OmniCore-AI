@@ -29,5 +29,30 @@ jobs:
           node-version: 24
       - name: Run Worker authentication, fallback and rate-limit tests
         run: node --experimental-strip-types --test src/index.test.ts
+      - name: Validate D1 migrations against SQLite
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import sqlite3
+
+          db = sqlite3.connect(":memory:")
+          migrations = sorted(pathlib.Path("migrations").glob("*.sql"))
+          assert len(migrations) >= 4, "Expected all D1 migrations"
+          for migration in migrations:
+              db.executescript(migration.read_text(encoding="utf-8"))
+              print(f"Applied {migration.name}")
+
+          required = {
+              "api_keys": {"id", "key_hash", "name", "created_at", "revoked_at"},
+              "rate_limit_windows": {"key_hash", "window_start", "request_count"},
+              "provider_circuits": {"provider", "failure_count", "opened_until"},
+              "usage_events": {"id", "provider", "model", "status", "created_at", "api_key_id"},
+          }
+          for table, expected in required.items():
+              columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+              missing = expected - columns
+              assert not missing, f"{table} missing columns: {sorted(missing)}"
+          print("D1 migration schema validation passed")
+          PY
       - name: Validate Wrangler configuration and build bundle (no deployment)
         run: npx --yes wrangler@4 deploy --dry-run --outdir .wrangler/deploy
