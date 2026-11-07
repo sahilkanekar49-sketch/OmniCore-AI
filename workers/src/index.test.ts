@@ -477,3 +477,23 @@ test("provider health returns 503 when circuit storage is unavailable", async ()
   assert.equal(response.status, 503);
   assert.equal((await response.json() as { error: { code: string } }).error.code, "provider_health_unavailable");
 });
+
+test("admin credentials cannot be used for inference endpoints", async () => {
+  const env = makeEnv({ OMNICORE_ADMIN_KEY: "admin-secret" });
+  const models = await worker.fetch(new Request("https://omnicore.test/v1/models", { headers: { authorization: "Bearer admin-secret" } }), env);
+  const chat = await worker.fetch(chatRequest("admin-secret"), env);
+  assert.equal(models.status, 401);
+  assert.equal(chat.status, 401);
+});
+
+test("chunked request bodies exceeding 1 MiB are rejected while streaming", async () => {
+  const payload = JSON.stringify({ messages: [{ role: "user", content: "x".repeat(1_100_000) }] });
+  const request = new Request("https://omnicore.test/v1/chat/completions", {
+    method: "POST",
+    headers: { authorization: "Bearer test-secret-key", "content-type": "application/json" },
+    body: payload,
+  });
+  const response = await worker.fetch(request, makeEnv());
+  assert.equal(response.status, 413);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "body_too_large");
+});
