@@ -37,6 +37,8 @@ The optional legacy `OMNICORE_API_KEY` secret remains as a bootstrap compatibili
 
 - Per-key D1 fixed-window rate limits default to 60 requests per 60 seconds. Tune with `RATE_LIMIT_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS`.
 - Rate limiting fails closed with HTTP 503 if D1 cannot enforce the counter.
+- Managed-key authentication returns HTTP 401 only for invalid/revoked credentials; D1 lookup outages return HTTP 503 with `Retry-After`.
+- Admin key listing returns HTTP 503 if its D1 query fails; it never falls back to exposing stored key hashes.
 - Request body cap: 1 MiB.
 - CORS is disabled by default. Set `CORS_ALLOWED_ORIGINS` to comma-separated exact origins; wildcard origins are not supported.
 - Never log or store plaintext keys, provider credentials, prompts, or completions.
@@ -71,4 +73,4 @@ GitHub Actions runs the Worker test suite and Wrangler dry-run. The dry-run does
 
 No deployment, D1 creation, secrets, billing activation, or paid service has been performed. `wrangler.toml` contains a placeholder D1 ID and must not be deployed until a real database is provisioned and migrations are applied. Confirm provider pricing/free quotas before use.
 
-This is a hardened development build, not a production certification. Live provider tests, Workers AI streaming, per-tenant quotas/plans, managed key listing/rotation, scheduled retention cleanup, and deeper D1 integration tests remain follow-up work.
+This is a hardened development build, not a production certification. Live provider tests, Workers AI streaming, per-tenant quotas/plans, managed key rotation/expiry, live provider tests, scheduled retention behavior in a deployed environment, and deeper D1 integration/concurrency tests remain follow-up work.
