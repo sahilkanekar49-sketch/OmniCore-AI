@@ -249,6 +249,7 @@ test("admin key listing returns active metadata only and never exposes key mater
                 if (sql.includes("rate_limit_windows")) return { request_count: 1 };
                 return null;
               },
+              async all() { assert.match(sql, /SELECT id, name, created_at, expires_at FROM api_keys/); return { results: rows }; },
               async run() { return { success: true, meta: { changes: 0 } }; },
             };
           },
@@ -344,11 +345,7 @@ test("admin key listing returns an empty list when D1 has no active keys", async
     DB: {
       prepare(sql: string) {
         return {
-          bind() { return { async first() { return { request_count: 1 }; } }; },
-          async all() {
-            assert.match(sql, /revoked_at IS NULL/);
-            return { results: [] };
-          },
+          bind() { return { async first() { return { request_count: 1 }; }, async all() { assert.match(sql, /revoked_at IS NULL/); return { results: [] }; } }; },
         };
       },
     },
@@ -431,4 +428,24 @@ test("key creation rejects invalid expiry windows", async () => {
   const response = await worker.fetch(new Request("https://omnicore.test/v1/keys", { method: "POST", headers: { authorization: "Bearer admin-secret", "content-type": "application/json" }, body: JSON.stringify({ name: "bad expiry", expires_in_days: 9999 }) }), env);
   assert.equal(response.status, 400);
   assert.equal((await response.json() as { error: { code: string } }).error.code, "invalid_key_expiry");
+});
+
+test("key rotation issues a replacement and atomically revokes the old key", async () => {
+  let batchSql: string[] = [];
+  const env = makeEnv({ OMNICORE_ADMIN_KEY: "admin-secret", DB: {
+    prepare(sql: string) { return { bind(...values: unknown[]) { return { sql, values }; } }; },
+    async batch(statements: Array<{ sql: string; values: unknown[] }>) {
+      batchSql = statements.map((statement) => statement.sql);
+      return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
+    },
+  } });
+  const oldId = "123e4567-e89b-12d3-a456-426614174000";
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/keys/" + oldId + "/rotate", { method: "POST", headers: { authorization: "Bearer admin-secret", "content-type": "application/json" }, body: JSON.stringify({ expires_in_days: 30 }) }), env);
+  assert.equal(response.status, 201);
+  const body = await response.json() as { api_key: string; replaces: string; expires_at: string };
+  assert.match(body.api_key, /^oc_live_[a-f0-9]{64}$/);
+  assert.equal(body.replaces, oldId);
+  assert.ok(body.expires_at);
+  assert.match(batchSql[0], /INSERT INTO api_keys .* SELECT .* FROM api_keys WHERE id = \?/);
+  assert.match(batchSql[1], /UPDATE api_keys SET revoked_at/);
 });
