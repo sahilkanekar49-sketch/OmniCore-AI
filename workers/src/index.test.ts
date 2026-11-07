@@ -383,3 +383,26 @@ test("rate limiting fails closed with 503 when D1 counter storage is unavailable
   const body = await response.json() as { error: { code: string } };
   assert.equal(body.error.code, "rate_limit_unavailable");
 });
+
+test("concurrent requests share one atomic per-key rate-limit counter", async () => {
+  let count = 0;
+  const env = makeEnv({
+    RATE_LIMIT_REQUESTS: "3",
+    DB: {
+      prepare(sql: string) {
+        assert.match(sql, /ON CONFLICT\(key_hash, window_start\) DO UPDATE/);
+        return { bind() { return {
+          async first() { count += 1; return { request_count: count }; },
+        }; } };
+      },
+    },
+  });
+  const responses = await Promise.all(Array.from({ length: 5 }, () =>
+    worker.fetch(new Request("https://omnicore.test/v1/models", {
+      headers: { authorization: "Bearer test-secret-key" },
+    }), env)
+  ));
+  assert.equal(responses.filter((response) => response.status === 200).length, 3);
+  assert.equal(responses.filter((response) => response.status === 429).length, 2);
+  assert.equal(count, 5);
+});
