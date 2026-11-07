@@ -39,6 +39,59 @@ function chatRequest(key = "test-secret-key") {
   });
 }
 
+
+test("admin can issue a managed key and that key authenticates", async () => {
+  const keys = new Map<string, { id: string; key_hash: string; name: string }>();
+  const env = makeEnv({
+    OMNICORE_ADMIN_KEY: "admin-secret",
+    DB: {
+      prepare(sql: string) {
+        return {
+          bind(...values: unknown[]) {
+            return {
+              async first() {
+                if (sql.includes("SELECT id, key_hash, name FROM api_keys")) {
+                  return [...keys.values()].find((key) => key.key_hash === values[0]) || null;
+                }
+                if (sql.includes("rate_limit_windows")) return { request_count: 1 };
+                if (sql.includes("provider_circuits")) return null;
+                return null;
+              },
+              async run() {
+                if (sql.includes("INSERT INTO api_keys")) {
+                  keys.set(String(values[0]), { id: String(values[0]), key_hash: String(values[1]), name: String(values[2]) });
+                }
+                return { success: true, meta: { changes: 1 } };
+              },
+            };
+          },
+        };
+      },
+    },
+  });
+  const created = await worker.fetch(new Request("https://omnicore.test/v1/keys", {
+    method: "POST",
+    headers: { authorization: "Bearer admin-secret", "content-type": "application/json" },
+    body: JSON.stringify({ name: "test client" }),
+  }), env);
+  assert.equal(created.status, 201);
+  const data = await created.json() as { api_key: string; id: string };
+  assert.match(data.api_key, /^oc_live_[a-f0-9]{64}$/);
+  const models = await worker.fetch(new Request("https://omnicore.test/v1/models", {
+    headers: { authorization: "Bearer " + data.api_key },
+  }), env);
+  assert.equal(models.status, 200);
+});
+
+test("key management rejects non-admin credentials", async () => {
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/keys", {
+    method: "POST",
+    headers: { authorization: "Bearer test-secret-key", "content-type": "application/json" },
+    body: JSON.stringify({ name: "unauthorized" }),
+  }), makeEnv());
+  assert.equal(response.status, 401);
+});
+
 test("health endpoint is public", async () => {
   const response = await worker.fetch(new Request("https://omnicore.test/health"), makeEnv());
   assert.equal(response.status, 200);
