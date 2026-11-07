@@ -115,10 +115,15 @@ async function listApiKeys(request: Request, env: Env): Promise<Response> {
   if (!(await requireAdmin(request, env))) return json(openAIError("Admin authentication required", "authentication_error", "admin_required"), 401);
   const adminLimit = await enforceRateLimit(request, env, await sha256(env.OMNICORE_ADMIN_KEY || ""));
   if (adminLimit) return adminLimit;
-  const result = await env.DB.prepare(
-    "SELECT id, name, created_at FROM api_keys WHERE revoked_at IS NULL ORDER BY created_at DESC LIMIT 500",
-  ).all<{ id: string; name: string; created_at: string }>();
-  return json({ object: "list", data: result.results || [] });
+  try {
+    const result = await env.DB.prepare(
+      "SELECT id, name, created_at FROM api_keys WHERE revoked_at IS NULL ORDER BY created_at DESC LIMIT 500",
+    ).all<{ id: string; name: string; created_at: string }>();
+    return json({ object: "list", data: result.results || [] });
+  } catch (error) {
+    console.error("API-key listing failed", error);
+    return json(openAIError("API-key management is temporarily unavailable.", "server_error", "key_listing_unavailable"), 503, { "retry-after": "5" });
+  }
 }
 
 async function revokeApiKey(request: Request, env: Env, id: string): Promise<Response> {
