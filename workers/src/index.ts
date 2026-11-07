@@ -38,6 +38,32 @@ function json(data: unknown, status = 200, extra: HeadersInit = {}): Response {
   });
 }
 
+
+async function readBodyWithinLimit(request: Request, maxBytes: number): Promise<string | null> {
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+  return new TextDecoder().decode(body);
+}
+
 function openAIError(message: string, type = "api_error", code: string | null = null) {
   return { error: { message, type, param: null, code } };
 }
@@ -61,9 +87,7 @@ async function authenticate(request: Request, env: Env): Promise<ApiPrincipal | 
   const parts = header.trim().split(" ").filter(Boolean);
   if (parts.length !== 2 || parts[0].toLowerCase() !== "bearer") return null;
   const suppliedHash = await sha256(parts[1]);
-  if (env.OMNICORE_ADMIN_KEY && constantTimeEqual(suppliedHash, await sha256(env.OMNICORE_ADMIN_KEY))) {
-    return { id: "admin", keyHash: suppliedHash, name: "admin", admin: true };
-  }
+  // Admin credentials are intentionally excluded from inference authentication.
   // Optional bootstrap key keeps initial migration compatible; issue managed keys before multi-user use.
   if (env.OMNICORE_API_KEY && constantTimeEqual(suppliedHash, await sha256(env.OMNICORE_API_KEY))) {
     return { id: "bootstrap", keyHash: suppliedHash, name: "bootstrap", admin: false };
@@ -401,10 +425,8 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
   if (declaredLength > MAX_BODY_BYTES) return json(openAIError("Request body exceeds 1 MiB", "invalid_request_error", "body_too_large"), 413);
   let body: ChatRequest;
   try {
-    const raw = await request.text();
-    if (new TextEncoder().encode(raw).byteLength > MAX_BODY_BYTES) {
-      return json(openAIError("Request body exceeds 1 MiB", "invalid_request_error", "body_too_large"), 413);
-    }
+    const raw = await readBodyWithinLimit(request, MAX_BODY_BYTES);
+    if (raw === null) return json(openAIError("Request body exceeds 1 MiB", "invalid_request_error", "body_too_large"), 413);
     body = JSON.parse(raw) as ChatRequest;
   } catch {
     return json(openAIError("Request body must be valid JSON", "invalid_request_error", "invalid_json"), 400);
