@@ -497,3 +497,26 @@ test("chunked request bodies exceeding 1 MiB are rejected while streaming", asyn
   assert.equal(response.status, 413);
   assert.equal((await response.json() as { error: { code: string } }).error.code, "body_too_large");
 });
+
+test("key management rejects oversized request bodies", async () => {
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/keys", {
+    method: "POST", headers: { authorization: "Bearer admin-secret", "content-type": "application/json" },
+    body: JSON.stringify({ name: "x".repeat(5_000) }),
+  }), makeEnv({ OMNICORE_ADMIN_KEY: "admin-secret" }));
+  assert.equal(response.status, 413);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "body_too_large");
+});
+
+test("key revocation returns 503 when D1 write fails", async () => {
+  const env = makeEnv({ OMNICORE_ADMIN_KEY: "admin-secret", DB: {
+    prepare(sql: string) { return { bind() { return {
+      async first() { return { request_count: 1 }; },
+      async run() { if (sql.includes("UPDATE api_keys")) throw new Error("D1 unavailable"); return { success: true }; },
+    }; } }; },
+  } });
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/keys/123e4567-e89b-12d3-a456-426614174000", {
+    method: "DELETE", headers: { authorization: "Bearer admin-secret" },
+  }), env);
+  assert.equal(response.status, 503);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "key_revocation_failed");
+});
