@@ -57,7 +57,7 @@ function constantTimeEqual(a: string, b: string): boolean {
 
 async function authenticate(request: Request, env: Env): Promise<ApiPrincipal | null> {
   const header = request.headers.get("authorization") || "";
-  const parts = header.trim().split(/\\s+/);
+  const parts = header.trim().split(" ").filter(Boolean);
   if (parts.length !== 2 || parts[0].toLowerCase() !== "bearer") return null;
   const suppliedHash = await sha256(parts[1]);
   if (env.OMNICORE_ADMIN_KEY && constantTimeEqual(suppliedHash, await sha256(env.OMNICORE_ADMIN_KEY))) {
@@ -81,7 +81,7 @@ async function authenticate(request: Request, env: Env): Promise<ApiPrincipal | 
 
 async function requireAdmin(request: Request, env: Env): Promise<boolean> {
   const header = request.headers.get("authorization") || "";
-  const parts = header.trim().split(/\\s+/);
+  const parts = header.trim().split(" ").filter(Boolean);
   return Boolean(parts.length === 2 && parts[0].toLowerCase() === "bearer" && env.OMNICORE_ADMIN_KEY &&
     constantTimeEqual(await sha256(parts[1]), await sha256(env.OMNICORE_ADMIN_KEY)));
 }
