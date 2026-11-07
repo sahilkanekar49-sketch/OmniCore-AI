@@ -1,6 +1,9 @@
 export interface Env {
   DB: D1Database;
-  OMNICORE_API_KEY: string;
+  OMNICORE_API_KEY?: string;
+  OMNICORE_ADMIN_KEY?: string;
+  CIRCUIT_FAILURE_THRESHOLD?: string;
+  CIRCUIT_OPEN_SECONDS?: string;
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL?: string;
   GEMINI_API_KEY?: string;
@@ -12,6 +15,7 @@ export interface Env {
   CORS_ALLOWED_ORIGINS?: string;
 }
 
+type ApiPrincipal = { id: string; keyHash: string; name: string; admin: boolean };
 type ChatMessage = { role: string; content: unknown };
 type ChatRequest = {
   model?: string;
@@ -51,12 +55,65 @@ function constantTimeEqual(a: string, b: string): boolean {
   return difference === 0;
 }
 
-async function authorized(request: Request, env: Env): Promise<boolean> {
+async function authenticate(request: Request, env: Env): Promise<ApiPrincipal | null> {
   const header = request.headers.get("authorization") || "";
-  const match = /^Bearer ([^\s]+)$/i.exec(header);
-  if (!match || !env.OMNICORE_API_KEY) return false;
-  const [supplied, expected] = await Promise.all([sha256(match[1]), sha256(env.OMNICORE_API_KEY)]);
-  return constantTimeEqual(supplied, expected);
+  const match = /^Bearer ([^\\s]+)$/i.exec(header);
+  if (!match) return null;
+  const suppliedHash = await sha256(match[1]);
+  if (env.OMNICORE_ADMIN_KEY && constantTimeEqual(suppliedHash, await sha256(env.OMNICORE_ADMIN_KEY))) {
+    return { id: "admin", keyHash: suppliedHash, name: "admin", admin: true };
+  }
+  // Optional bootstrap key keeps initial migration compatible; issue managed keys before multi-user use.
+  if (env.OMNICORE_API_KEY && constantTimeEqual(suppliedHash, await sha256(env.OMNICORE_API_KEY))) {
+    return { id: "bootstrap", keyHash: suppliedHash, name: "bootstrap", admin: false };
+  }
+  try {
+    const row = await env.DB.prepare(
+      "SELECT id, key_hash, name FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1",
+    ).bind(suppliedHash).first<{ id: string; key_hash: string; name: string }>();
+    if (!row) return null;
+    return { id: row.id, keyHash: row.key_hash, name: row.name, admin: false };
+  } catch (error) {
+    console.error("API-key lookup failed", error);
+    return null;
+  }
+}
+
+async function requireAdmin(request: Request, env: Env): Promise<boolean> {
+  const header = request.headers.get("authorization") || "";
+  const match = /^Bearer ([^\\s]+)$/i.exec(header);
+  return Boolean(match && env.OMNICORE_ADMIN_KEY &&
+    constantTimeEqual(await sha256(match[1]), await sha256(env.OMNICORE_ADMIN_KEY)));
+}
+
+async function issueApiKey(request: Request, env: Env): Promise<Response> {
+  if (!(await requireAdmin(request, env))) return json(openAIError("Admin authentication required", "authentication_error", "admin_required"), 401);
+  let input: { name?: string };
+  try { input = await request.json() as { name?: string }; } catch {
+    return json(openAIError("Valid JSON body required", "invalid_request_error", "invalid_json"), 400);
+  }
+  const name = String(input.name || "").trim().slice(0, 80);
+  if (!name) return json(openAIError("Key name is required", "invalid_request_error", "invalid_key_name"), 400);
+  const id = crypto.randomUUID();
+  const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
+  const token = "oc_live_" + [...tokenBytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const hash = await sha256(token);
+  try {
+    await env.DB.prepare("INSERT INTO api_keys (id, key_hash, name, created_at) VALUES (?, ?, ?, ?)")
+      .bind(id, hash, name, new Date().toISOString()).run();
+    return json({ id, name, api_key: token, created_at: new Date().toISOString(), warning: "Store this key securely; it will not be shown again." }, 201);
+  } catch (error) {
+    console.error("API-key creation failed", error);
+    return json(openAIError("Could not create API key", "server_error", "key_creation_failed"), 503);
+  }
+}
+
+async function revokeApiKey(request: Request, env: Env, id: string): Promise<Response> {
+  if (!(await requireAdmin(request, env))) return json(openAIError("Admin authentication required", "authentication_error", "admin_required"), 401);
+  const result = await env.DB.prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+    .bind(new Date().toISOString(), id).run();
+  if (!result.meta?.changes) return json(openAIError("API key not found or already revoked", "invalid_request_error", "key_not_found"), 404);
+  return json({ id, revoked: true });
 }
 
 function configuredProviders(env: Env): string[] {
@@ -83,12 +140,12 @@ function corsHeaders(request: Request, env: Env): Record<string, string> {
   };
 }
 
-async function enforceRateLimit(request: Request, env: Env): Promise<Response | null> {
+async function enforceRateLimit(request: Request, env: Env, keyHash: string): Promise<Response | null> {
   const limit = Math.max(1, Math.min(10_000, Number.parseInt(env.RATE_LIMIT_REQUESTS || "60", 10) || 60));
   const windowSeconds = Math.max(1, Math.min(86_400, Number.parseInt(env.RATE_LIMIT_WINDOW_SECONDS || "60", 10) || 60));
   const now = Math.floor(Date.now() / 1000);
   const windowStart = Math.floor(now / windowSeconds) * windowSeconds;
-  const key = await sha256(env.OMNICORE_API_KEY);
+  const key = keyHash;
   try {
     const row = await env.DB.prepare(
       "INSERT INTO rate_limit_windows (key_hash, window_start, request_count) VALUES (?, ?, 1) " +
@@ -212,9 +269,41 @@ async function attemptProvider(provider: string, body: ChatRequest, env: Env): P
   throw new Error("Provider retry loop exhausted");
 }
 
+async function circuitIsOpen(env: Env, provider: string): Promise<boolean> {
+  try {
+    const row = await env.DB.prepare("SELECT opened_until FROM provider_circuits WHERE provider = ?")
+      .bind(provider).first<{ opened_until: number }>();
+    return Boolean(row && row.opened_until > Math.floor(Date.now() / 1000));
+  } catch (error) {
+    console.error("circuit state lookup failed", error);
+    return false; // availability wins; bounded provider timeout/retry still applies
+  }
+}
+
+async function recordProviderResult(env: Env, provider: string, success: boolean): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  const threshold = Math.max(2, Math.min(20, Number.parseInt(env.CIRCUIT_FAILURE_THRESHOLD || "3", 10) || 3));
+  const openSeconds = Math.max(10, Math.min(3600, Number.parseInt(env.CIRCUIT_OPEN_SECONDS || "60", 10) || 60));
+  try {
+    if (success) {
+      await env.DB.prepare("DELETE FROM provider_circuits WHERE provider = ?").bind(provider).run();
+    } else {
+      await env.DB.prepare(
+        "INSERT INTO provider_circuits (provider, failure_count, opened_until, last_failure_at, updated_at) VALUES (?, 1, 0, ?, ?) " +
+        "ON CONFLICT(provider) DO UPDATE SET failure_count = failure_count + 1, " +
+        "opened_until = CASE WHEN failure_count + 1 >= ? THEN ? ELSE opened_until END, " +
+        "last_failure_at = excluded.last_failure_at, updated_at = excluded.updated_at",
+      ).bind(provider, now, now, threshold, now + openSeconds).run();
+    }
+  } catch (error) {
+    console.error("circuit state update failed", error);
+  }
+}
+
 async function handleChat(request: Request, env: Env): Promise<Response> {
-  if (!(await authorized(request, env))) return json(openAIError("Invalid API key", "authentication_error", "invalid_api_key"), 401, { "www-authenticate": "Bearer" });
-  const limited = await enforceRateLimit(request, env);
+  const principal = await authenticate(request, env);
+  if (!principal) return json(openAIError("Invalid API key", "authentication_error", "invalid_api_key"), 401, { "www-authenticate": "Bearer" });
+  const limited = await enforceRateLimit(request, env, principal.keyHash);
   if (limited) return limited;
 
   const declaredLength = Number(request.headers.get("content-length") || 0);
@@ -237,22 +326,26 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
 
   const failures: string[] = [];
   for (const provider of providers) {
+    if (await circuitIsOpen(env, provider)) { failures.push(provider + ": circuit open"); continue; }
     try {
       const response = await attemptProvider(provider, body, env);
       if (!response.ok) {
         const detail = (await response.text()).slice(0, 300);
         failures.push(provider + ": HTTP " + response.status + " " + detail);
+        await recordProviderResult(env, provider, false);
         if (!shouldFallback(response.status)) {
           return json(openAIError("Provider rejected the request (" + provider + ").", "invalid_request_error", "provider_request_rejected"), response.status);
         }
         continue;
       }
+      await recordProviderResult(env, provider, true);
       await recordUsage(env, provider, String(body.model || env.DEFAULT_MODEL || DEFAULT_MODEL), response.status);
       const headers = new Headers(response.headers);
       headers.set("x-omnicore-provider", provider);
       headers.set("cache-control", "no-store");
       return new Response(response.body, { status: response.status, headers });
     } catch (error) {
+      await recordProviderResult(env, provider, false);
       failures.push(provider + ": " + (error instanceof Error ? error.message : String(error)));
     }
   }
@@ -269,9 +362,12 @@ export default {
       return json({ status: "ok", service: "OmniCore AI", runtime: "cloudflare-workers" }, 200, cors);
     }
     if (url.pathname === "/v1/models" && request.method === "GET") {
-      if (!(await authorized(request, env))) return json(openAIError("Invalid API key", "authentication_error", "invalid_api_key"), 401, { ...cors, "www-authenticate": "Bearer" });
+      if (!(await authenticate(request, env))) return json(openAIError("Invalid API key", "authentication_error", "invalid_api_key"), 401, { ...cors, "www-authenticate": "Bearer" });
       return json(modelList(env), 200, cors);
     }
+    if (url.pathname === "/v1/keys" && request.method === "POST") return issueApiKey(request, env);
+    const revokeMatch = /^\\/v1\\/keys\\/([0-9a-f-]+)$/.exec(url.pathname);
+    if (revokeMatch && request.method === "DELETE") return revokeApiKey(request, env, revokeMatch[1]);
     if (url.pathname === "/v1/chat/completions" && request.method === "POST") {
       const response = await handleChat(request, env);
       const headers = new Headers(response.headers);
