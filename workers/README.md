@@ -8,6 +8,7 @@ A separate Cloudflare-native edition. The upstream Next.js/Node application and 
 - `GET /v1/models` — OpenAI-style model list; requires a bearer API key.
 - `POST /v1/chat/completions` — OpenAI-compatible chat endpoint with ordered provider fallback.
 - `GET /v1/keys` — list active key metadata (never plaintext keys); requires the admin bearer key.
+- `GET /v1/providers/health` — admin-only configured-provider and circuit-breaker status; never returns credentials.
 - `POST /v1/keys` — create a managed API key; requires the admin bearer key. Defaults to a 90-day expiry; `expires_in_days` accepts 1–365.
 - `DELETE /v1/keys/{id}` — revoke a managed API key; requires the admin bearer key.
 - `POST /v1/keys/{id}/rotate` — issue a replacement key and revoke the old key in one D1 batch.
@@ -48,7 +49,7 @@ The optional legacy `OMNICORE_API_KEY` secret remains as a bootstrap compatibili
 
 Providers: Workers AI, OpenAI-compatible endpoint, and Gemini OpenAI-compatible endpoint. Configure credentials only as Worker secrets. Set `FALLBACK_ORDER` to a comma-separated order.
 
-Transient HTTP failures receive one bounded retry, honoring a capped Retry-After delay. Credential/model endpoint errors (401/403/404) may fall through to the next configured provider. Other client errors stop fallback. A D1-backed circuit breaker opens after 3 provider failures for 60 seconds by default; tune with `CIRCUIT_FAILURE_THRESHOLD` and `CIRCUIT_OPEN_SECONDS`. Successful calls reset that provider's circuit state.
+Transient HTTP failures receive one bounded retry, honoring numeric or HTTP-date Retry-After values with a 1.5-second cap. Provider health is available through the admin-only `GET /v1/providers/health` endpoint; it reports configured providers and circuit state without exposing credentials. Provider response bodies and exception messages are excluded from aggregate failure logs. Credential/model endpoint errors (401/403/404) may fall through to the next configured provider. Other client errors stop fallback. A D1-backed circuit breaker opens after 3 provider failures for 60 seconds by default; tune with `CIRCUIT_FAILURE_THRESHOLD` and `CIRCUIT_OPEN_SECONDS`. Successful calls reset that provider's circuit state.
 
 The upstream fetch deadline is 25 seconds. A failure after streaming response headers have been returned cannot safely be retried through another provider. Workers AI remains non-streaming in this version.
 
