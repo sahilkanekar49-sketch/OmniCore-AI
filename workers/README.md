@@ -65,11 +65,13 @@ From this directory with Node 24+:
 
 ```sh
 node --experimental-strip-types --test src/index.test.ts
+npm install --no-save --no-package-lock vitest@^4.1.0 @cloudflare/vitest-plugin
+npx vitest run --config vitest.config.ts
 npx wrangler types
 npx wrangler deploy --dry-run
 ```
 
-GitHub Actions runs the Worker test suite and Wrangler dry-run. The dry-run does not deploy.
+GitHub Actions runs the mocked unit suite, the Workers Vitest integration suite against local Miniflare D1, SQLite migration/backfill validation, and Wrangler dry-run. The dry-run does not deploy. See [D1 integration testing strategy](D1_INTEGRATION_TEST_PLAN.md) and [security review](SECURITY_REVIEW.md).
 
 ## Deployment gate and limitations
 
