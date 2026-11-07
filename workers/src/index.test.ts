@@ -51,7 +51,7 @@ test("admin can issue a managed key and that key authenticates", async () => {
             return {
               async first() {
                 if (sql.includes("SELECT id, key_hash, name FROM api_keys")) {
-                  return [...keys.values()].find((key) => key.key_hash === values[0]) || null;
+                  return [...keys.values()].find((key) => key.key_hash === values[0] && !(key as { revoked?: boolean }).revoked) || null;
                 }
                 if (sql.includes("rate_limit_windows")) return { request_count: 1 };
                 if (sql.includes("provider_circuits")) return null;
@@ -61,6 +61,7 @@ test("admin can issue a managed key and that key authenticates", async () => {
                 if (sql.includes("INSERT INTO api_keys")) {
                   keys.set(String(values[0]), { id: String(values[0]), key_hash: String(values[1]), name: String(values[2]) });
                 }
+                if (sql.includes("UPDATE api_keys")) { const key = keys.get(String(values[1])); if (key) (key as { revoked?: boolean }).revoked = true; }
                 return { success: true, meta: { changes: 1 } };
               },
             };
@@ -81,6 +82,10 @@ test("admin can issue a managed key and that key authenticates", async () => {
     headers: { authorization: "Bearer " + data.api_key },
   }), env);
   assert.equal(models.status, 200);
+  const revoked = await worker.fetch(new Request("https://omnicore.test/v1/keys/" + data.id, { method: "DELETE", headers: { authorization: "Bearer admin-secret" } }), env);
+  assert.equal(revoked.status, 200);
+  const rejectedAfterRevoke = await worker.fetch(new Request("https://omnicore.test/v1/models", { headers: { authorization: "Bearer " + data.api_key } }), env);
+  assert.equal(rejectedAfterRevoke.status, 401);
 });
 
 test("key management rejects non-admin credentials", async () => {
@@ -186,6 +191,32 @@ test("rate limit returns 429 with retry metadata", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("open provider circuit skips an unavailable provider", async () => {
+  let upstreamCalls = 0;
+  const env = makeEnv({
+    FALLBACK_ORDER: "openai",
+    DB: {
+      prepare(sql: string) {
+        return { bind(..._values: unknown[]) { return {
+          async first() {
+            if (sql.includes("rate_limit_windows")) return { request_count: 1 };
+            if (sql.includes("provider_circuits")) return { opened_until: Math.floor(Date.now() / 1000) + 120 };
+            return null;
+          },
+          async run() { return { success: true }; },
+        }; } };
+      },
+    },
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls++; return Response.json({ choices: [] }); };
+  try {
+    const response = await worker.fetch(chatRequest(), env);
+    assert.equal(response.status, 502);
+    assert.equal(upstreamCalls, 0);
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("unapproved browser origins receive no allow-origin header", async () => {
