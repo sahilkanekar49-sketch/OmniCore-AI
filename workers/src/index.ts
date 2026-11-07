@@ -91,8 +91,8 @@ async function issueApiKey(request: Request, env: Env): Promise<Response> {
   if (!(await requireAdmin(request, env))) return json(openAIError("Admin authentication required", "authentication_error", "admin_required"), 401);
   const adminLimit = await enforceRateLimit(request, env, await sha256(env.OMNICORE_ADMIN_KEY || ""));
   if (adminLimit) return adminLimit;
-  let input: { name?: string };
-  try { input = await request.json() as { name?: string }; } catch {
+  let input: { name?: string; expires_in_days?: number };
+  try { input = await request.json() as { name?: string; expires_in_days?: number }; } catch {
     return json(openAIError("Valid JSON body required", "invalid_request_error", "invalid_json"), 400);
   }
   const name = String(input.name || "").trim().slice(0, 80);
