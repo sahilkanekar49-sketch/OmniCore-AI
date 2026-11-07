@@ -49,7 +49,7 @@ The optional legacy `OMNICORE_API_KEY` secret remains as a bootstrap compatibili
 
 Providers: Workers AI, OpenAI-compatible endpoint, and Gemini OpenAI-compatible endpoint. Configure credentials only as Worker secrets. Set `FALLBACK_ORDER` to a comma-separated order.
 
-Transient HTTP failures receive one bounded retry, honoring numeric or HTTP-date Retry-After values with a 1.5-second cap. Provider health is available through the admin-only `GET /v1/providers/health` endpoint; it reports configured providers and circuit state without exposing credentials. Provider response bodies and exception messages are excluded from aggregate failure logs. Credential/model endpoint errors (401/403/404) may fall through to the next configured provider. Other client errors stop fallback. A D1-backed circuit breaker opens after 3 provider failures for 60 seconds by default; tune with `CIRCUIT_FAILURE_THRESHOLD` and `CIRCUIT_OPEN_SECONDS`. Successful calls reset that provider's circuit state.
+Transient HTTP failures receive one bounded retry, honoring numeric or HTTP-date Retry-After values with a 1.5-second cap. Provider diagnostics are available through the admin-only `GET /v1/providers/health` endpoint; it reports configured providers and circuit state without exposing credentials. This is circuit-state visibility, not an active upstream health probe. Provider response bodies and exception messages are excluded from aggregate failure logs. Credential/model endpoint errors (401/403/404) may fall through to the next configured provider. Other client errors stop fallback. A D1-backed circuit breaker opens after 3 provider failures for 60 seconds by default; tune with `CIRCUIT_FAILURE_THRESHOLD` and `CIRCUIT_OPEN_SECONDS`. Successful calls reset that provider's circuit state.
 
 The upstream fetch deadline is 25 seconds. A failure after streaming response headers have been returned cannot safely be retried through another provider. Workers AI remains non-streaming in this version.
 
@@ -75,6 +75,6 @@ GitHub Actions runs the mocked unit suite, the Workers Vitest integration suite 
 
 ## Deployment gate and limitations
 
-No deployment, D1 creation, secrets, billing activation, or paid service has been performed. `wrangler.toml` contains a placeholder D1 ID and must not be deployed until a real database is provisioned and migrations are applied. Confirm provider pricing/free quotas before use.
+No deployment, D1 creation, secrets, billing activation, or paid service has been performed. Review [deployment readiness](DEPLOYMENT_READINESS.md) and [security review](SECURITY_REVIEW.md) before any future deployment. `wrangler.toml` contains a placeholder D1 ID and must not be deployed until a real database is provisioned and migrations are applied. Confirm provider pricing/free quotas before use.
 
 This is a hardened development build, not a production certification. Live provider tests, Workers AI streaming, per-tenant quotas/plans, live provider tests, scheduled retention behavior in a deployed environment, and deeper D1 integration/concurrency tests remain follow-up work.
