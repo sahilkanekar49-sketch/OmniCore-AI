@@ -1,42 +1,62 @@
 # OmniCore AI — Cloudflare Worker gateway
 
-This is a separate Cloudflare-native edition. The upstream Next.js/Node application and its SQLite implementation remain untouched.
+A separate Cloudflare-native edition. The upstream Next.js/Node application and its SQLite implementation remain untouched.
 
-## Included endpoints
+## Endpoints
 
-- `GET /health` — unauthenticated health check.
+- `GET /health` — public health check.
 - `GET /v1/models` — OpenAI-style model list; requires a bearer API key.
-- `POST /v1/chat/completions` — OpenAI-compatible chat request with ordered provider fallback.
+- `POST /v1/chat/completions` — OpenAI-compatible chat endpoint with ordered provider fallback.
+- `POST /v1/keys` — create a managed API key; requires the admin bearer key.
+- `DELETE /v1/keys/{id}` — revoke a managed API key; requires the admin bearer key.
 
-## Security and request controls
+## Authentication and key lifecycle
 
-- Gateway requests require one configured bearer key; malformed or absent bearer credentials are rejected.
-- API key comparison uses SHA-256 digests and a constant-time byte comparison.
-- Chat request bodies are capped at 1 MiB.
-- D1-backed fixed-window rate limiting defaults to 60 requests per 60 seconds. Set `RATE_LIMIT_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS` to tune it.
-- Rate limiting fails closed with HTTP 503 if D1 cannot atomically update the counter.
-- CORS is disabled by default. Set `CORS_ALLOWED_ORIGINS` to a comma-separated exact-origin allowlist; wildcard origins are not supported.
-- Do not log or store API keys, provider credentials, prompts, or completions.
+Set `OMNICORE_ADMIN_KEY` as a Cloudflare Worker secret. Use it only for key administration. A managed key is generated with 256 bits of cryptographic randomness, shown once, and stored only as a SHA-256 digest in D1. Revoke it immediately if exposed.
 
-## Providers and fallback
+Example key creation:
 
-- Cloudflare Workers AI binding (`WORKERS_AI`).
-- OpenAI-compatible endpoint (`OPENAI_API_KEY`, optional `OPENAI_BASE_URL`).
-- Gemini OpenAI-compatible endpoint (`GEMINI_API_KEY`).
+```sh
+curl -X POST https://YOUR-WORKER/v1/keys \
+  -H "Authorization: Bearer $OMNICORE_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"my app"}'
+```
 
-Set `FALLBACK_ORDER` to a comma-separated order, for example `workers-ai,openai,gemini`. A provider is skipped if its credential/binding is absent. Transient failures (408, 425, 429, and selected 5xx responses) receive one bounded retry before the next provider is attempted. Non-retryable 4xx responses stop fallback because they usually indicate an invalid request or provider configuration. Provider model compatibility varies; validate selected models with each provider.
+Revoke by the returned ID:
 
-The OpenAI-compatible fetch uses a 25-second abort deadline that remains active while the response body is consumed. A response stream that fails after headers have been returned cannot safely be retried through another provider.
+```sh
+curl -X DELETE https://YOUR-WORKER/v1/keys/KEY_ID \
+  -H "Authorization: Bearer $OMNICORE_ADMIN_KEY"
+```
 
-## Persistence and secrets
+The optional legacy `OMNICORE_API_KEY` secret remains as a bootstrap compatibility key. Remove it after creating and verifying managed keys. Do not use the admin key for normal inference clients.
 
-D1 stores usage metadata and fixed-window rate-limit counters. Never put provider credentials or the gateway API key in D1, source files, GitHub Actions variables, or committed Wrangler configuration. Configure `OMNICORE_API_KEY`, `OPENAI_API_KEY`, and `GEMINI_API_KEY` with Cloudflare Worker secrets only after deployment is explicitly approved. Configure the D1 database ID in a private deployment environment; the placeholder in wrangler.toml must be replaced before deploy.
+## Request protection
 
-Old rate-limit windows are not automatically pruned yet; add a scheduled cleanup only after reviewing the required Worker cron/resource configuration.
+- Per-key D1 fixed-window rate limits default to 60 requests per 60 seconds. Tune with `RATE_LIMIT_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS`.
+- Rate limiting fails closed with HTTP 503 if D1 cannot enforce the counter.
+- Request body cap: 1 MiB.
+- CORS is disabled by default. Set `CORS_ALLOWED_ORIGINS` to comma-separated exact origins; wildcard origins are not supported.
+- Never log or store plaintext keys, provider credentials, prompts, or completions.
+
+## Provider reliability
+
+Providers: Workers AI, OpenAI-compatible endpoint, and Gemini OpenAI-compatible endpoint. Configure credentials only as Worker secrets. Set `FALLBACK_ORDER` to a comma-separated order.
+
+Transient HTTP failures receive one bounded retry, honoring a capped Retry-After delay. Credential/model endpoint errors (401/403/404) may fall through to the next configured provider. Other client errors stop fallback. A D1-backed circuit breaker opens after 3 provider failures for 60 seconds by default; tune with `CIRCUIT_FAILURE_THRESHOLD` and `CIRCUIT_OPEN_SECONDS`. Successful calls reset that provider's circuit state.
+
+The upstream fetch deadline is 25 seconds. A failure after streaming response headers have been returned cannot safely be retried through another provider. Workers AI remains non-streaming in this version.
+
+## D1 and migrations
+
+Apply migrations in order: `0001_init.sql`, `0002_rate_limits.sql`, `0003_identity_and_circuit_breakers.sql`. D1 stores usage metadata, hashed API keys, rate-limit counters, and circuit state. Provider secrets and admin credentials must remain Worker secrets, never D1 or Git.
+
+Old rate-limit windows and revoked key records are retained for audit and storage control; scheduled retention cleanup is not enabled yet.
 
 ## Tests and validation
 
-From this directory, with Node 24 or newer:
+From this directory with Node 24+:
 
 ```sh
 node --experimental-strip-types --test src/index.test.ts
@@ -44,14 +64,10 @@ npx wrangler types
 npx wrangler deploy --dry-run
 ```
 
-GitHub Actions runs the Worker test suite and Wrangler dry-run on changes to this directory. The dry-run does not deploy.
+GitHub Actions runs the Worker test suite and Wrangler dry-run. The dry-run does not deploy.
 
-No deploy command should be run until the owner has reviewed the configuration, confirmed provider pricing/free quotas, and explicitly approved deployment.
+## Deployment gate and limitations
 
-## Known limitations
+No deployment, D1 creation, secrets, billing activation, or paid service has been performed. `wrangler.toml` contains a placeholder D1 ID and must not be deployed until a real database is provisioned and migrations are applied. Confirm provider pricing/free quotas before use.
 
-- Workers AI adapter is non-streaming; OpenAI-compatible providers pass through their response stream.
-- Authentication currently supports one shared gateway key, not independently revocable user keys.
-- Rate limits currently apply to that shared key and use fixed windows; distributed abuse controls and per-customer quotas require a stronger identity and policy layer.
-- Usage persistence records provider/model/status, not token counts or prompt/response content.
-- A free gateway does not make paid provider inference free. Verify each provider's current eligibility and quotas before use.
+This is a hardened development build, not a production certification. Live provider tests, Workers AI streaming, per-tenant quotas/plans, managed key listing/rotation, scheduled retention cleanup, and deeper D1 integration tests remain follow-up work.
