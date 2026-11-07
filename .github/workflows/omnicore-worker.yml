@@ -37,13 +37,13 @@ jobs:
 
           db = sqlite3.connect(":memory:")
           migrations = sorted(pathlib.Path("migrations").glob("*.sql"))
-          assert len(migrations) >= 4, "Expected all D1 migrations"
+          assert len(migrations) >= 5, "Expected all D1 migrations"
           for migration in migrations:
               db.executescript(migration.read_text(encoding="utf-8"))
               print(f"Applied {migration.name}")
 
           required = {
-              "api_keys": {"id", "key_hash", "name", "created_at", "revoked_at"},
+              "api_keys": {"id", "key_hash", "name", "created_at", "revoked_at", "expires_at"},
               "rate_limit_windows": {"key_hash", "window_start", "request_count"},
               "provider_circuits": {"provider", "failure_count", "opened_until"},
               "usage_events": {"id", "provider", "model", "status", "created_at", "api_key_id"},
