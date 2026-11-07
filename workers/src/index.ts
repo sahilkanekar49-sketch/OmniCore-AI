@@ -92,7 +92,9 @@ async function callOpenAICompatible(
 async function callWorkersAI(requestBody: ChatRequest, env: Env): Promise<Response> {
   if (!env.WORKERS_AI) throw new Error("Workers AI binding is not configured");
   if (requestBody.stream) throw new Error("Workers AI streaming adapter is not enabled yet");
-  const model = String(requestBody.model || "@cf/meta/llama-3.1-8b-instruct");
+  const requestedModel = String(requestBody.model || "");
+  // Non-Workers-AI aliases are mapped to the default free-tier Workers AI model.
+  const model = requestedModel.startsWith("@cf/") ? requestedModel : "@cf/meta/llama-3.1-8b-instruct";
   const result = await env.WORKERS_AI.run(model as keyof AiModels, {
     messages: requestBody.messages || [],
     max_tokens: typeof requestBody.max_tokens === "number" ? requestBody.max_tokens : 1024,
