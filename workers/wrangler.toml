@@ -1,0 +1,17 @@
+name = "omnicore-ai-gateway"
+main = "src/index.ts"
+compatibility_date = "2026-11-07"
+workers_dev = true
+
+[vars]
+FALLBACK_ORDER = "workers-ai,openai,gemini"
+DEFAULT_MODEL = "gpt-4o-mini"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "omnicore-ai"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[ai]
+binding = "WORKERS_AI"
