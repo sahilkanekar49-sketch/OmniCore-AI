@@ -30,7 +30,7 @@ jobs:
       - name: Run Worker authentication, fallback and rate-limit tests
         run: node --experimental-strip-types --test src/index.test.ts
       - name: Install ephemeral Workers Vitest integration dependencies
-        run: npm install --no-save --no-package-lock vitest@^4.1.0 @cloudflare/vitest-plugin
+        run: npm install --no-save --no-package-lock
       - name: Run Worker integration tests against local Miniflare D1
         run: npx vitest run --config vitest.config.ts
       - name: Validate D1 migrations against SQLite
