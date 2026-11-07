@@ -9,7 +9,7 @@ const migrations = await readD1Migrations(path.join(root, "migrations"));
 export default defineConfig({
   plugins: [
     cloudflareTest({
-      wrangler: { configPath: path.join(root, "wrangler.toml") },
+      wrangler: { configPath: path.join(root, "wrangler.test.toml") },
       miniflare: {
         bindings: {
           TEST_MIGRATIONS: migrations,
