@@ -433,7 +433,7 @@ test("key creation rejects invalid expiry windows", async () => {
 test("key rotation issues a replacement and atomically revokes the old key", async () => {
   let batchSql: string[] = [];
   const env = makeEnv({ OMNICORE_ADMIN_KEY: "admin-secret", DB: {
-    prepare(sql: string) { return { bind(...values: unknown[]) { return { sql, values }; } }; },
+    prepare(sql: string) { return { bind(...values: unknown[]) { return { sql, values, async first() { if (sql.includes("rate_limit_windows")) return { request_count: 1 }; return null; } }; } }; },
     async batch(statements: Array<{ sql: string; values: unknown[] }>) {
       batchSql = statements.map((statement) => statement.sql);
       return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
