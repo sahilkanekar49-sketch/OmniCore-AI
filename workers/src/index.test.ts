@@ -1,0 +1,131 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import worker from "./index.ts";
+
+function makeEnv(overrides: Record<string, unknown> = {}) {
+  let count = 0;
+  const env = {
+    OMNICORE_API_KEY: "test-secret-key",
+    RATE_LIMIT_REQUESTS: "5",
+    RATE_LIMIT_WINDOW_SECONDS: "60",
+    FALLBACK_ORDER: "openai,gemini",
+    OPENAI_API_KEY: "openai-test",
+    GEMINI_API_KEY: "gemini-test",
+    DB: {
+      prepare(sql: string) {
+        return {
+          bind(..._values: unknown[]) {
+            return {
+              async first() {
+                if (sql.includes("rate_limit_windows")) return { request_count: ++count };
+                return null;
+              },
+              async run() { return { success: true }; },
+            };
+          },
+        };
+      },
+    },
+    ...overrides,
+  };
+  return env as never;
+}
+
+function chatRequest(key = "test-secret-key") {
+  return new Request("https://omnicore.test/v1/chat/completions", {
+    method: "POST",
+    headers: { authorization: "Bearer " + key, "content-type": "application/json" },
+    body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: "hello" }] }),
+  });
+}
+
+test("health endpoint is public", async () => {
+  const response = await worker.fetch(new Request("https://omnicore.test/health"), makeEnv());
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).status, "ok");
+});
+
+test("models endpoint rejects missing and malformed bearer credentials", async () => {
+  const env = makeEnv();
+  const missing = await worker.fetch(new Request("https://omnicore.test/v1/models"), env);
+  const malformed = await worker.fetch(new Request("https://omnicore.test/v1/models", {
+    headers: { authorization: "test-secret-key" },
+  }), env);
+  assert.equal(missing.status, 401);
+  assert.equal(malformed.status, 401);
+});
+
+test("chat endpoint rejects invalid credentials before provider calls", async () => {
+  const response = await worker.fetch(chatRequest("wrong-key"), makeEnv());
+  assert.equal(response.status, 401);
+  assert.equal(response.headers.get("www-authenticate"), "Bearer");
+});
+
+test("provider fallback proceeds after retryable upstream failures", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    if (calls <= 2) return new Response("temporarily unavailable", { status: 503 });
+    return Response.json({ id: "ok", choices: [] });
+  };
+  try {
+    const response = await worker.fetch(chatRequest(), makeEnv());
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-omnicore-provider"), "gemini");
+    assert.equal(calls, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("provider 400 is not retried or sent to another provider", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response("bad request", { status: 400 });
+  };
+  try {
+    const response = await worker.fetch(chatRequest(), makeEnv());
+    assert.equal(response.status, 400);
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("rate limit returns 429 with retry metadata", async () => {
+  const env = makeEnv({
+    RATE_LIMIT_REQUESTS: "1",
+    DB: {
+      prepare() {
+        return { bind() { return { async first() { return { request_count: 2 }; }, async run() { return { success: true }; } }; } };
+      },
+    },
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ choices: [] });
+  try {
+    const response = await worker.fetch(chatRequest(), env);
+    assert.equal(response.status, 429);
+    assert.ok(Number(response.headers.get("retry-after")) >= 1);
+    assert.equal(response.headers.get("x-ratelimit-remaining"), "0");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("unapproved browser origins receive no allow-origin header", async () => {
+  const response = await worker.fetch(new Request("https://omnicore.test/health", {
+    headers: { origin: "https://evil.example" },
+  }), makeEnv());
+  assert.equal(response.headers.get("access-control-allow-origin"), null);
+});
+
+test("approved browser origins receive scoped CORS headers", async () => {
+  const response = await worker.fetch(new Request("https://omnicore.test/health", {
+    headers: { origin: "https://app.example" },
+  }), makeEnv({ CORS_ALLOWED_ORIGINS: "https://app.example" }));
+  assert.equal(response.headers.get("access-control-allow-origin"), "https://app.example");
+});
