@@ -284,3 +284,36 @@ test("API key listing rejects non-admin credentials", async () => {
   assert.equal(response.status, 401);
 });
 
+test("API-key database outage returns 503 instead of invalid-key 401", async () => {
+  const env = makeEnv({
+    OMNICORE_API_KEY: undefined,
+    DB: {
+      prepare() {
+        return { bind() { return { async first() { throw new Error("D1 unavailable"); } }; } };
+      },
+    },
+  });
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/models", {
+    headers: { authorization: "Bearer oc_live_test-key" },
+  }), env);
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("retry-after"), "5");
+  const body = await response.json() as { error: { code: string } };
+  assert.equal(body.error.code, "authentication_unavailable");
+});
+
+test("chat endpoint returns 503 when managed-key lookup database is unavailable", async () => {
+  const env = makeEnv({
+    OMNICORE_API_KEY: undefined,
+    DB: {
+      prepare() {
+        return { bind() { return { async first() { throw new Error("D1 unavailable"); } }; } };
+      },
+    },
+  });
+  const response = await worker.fetch(chatRequest("oc_live_test-key"), env);
+  assert.equal(response.status, 503);
+  const body = await response.json() as { error: { code: string } };
+  assert.equal(body.error.code, "authentication_unavailable");
+});
+
