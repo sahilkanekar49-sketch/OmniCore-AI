@@ -359,3 +359,27 @@ test("admin key listing returns an empty list when D1 has no active keys", async
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { object: "list", data: [] });
 });
+
+test("rate limiting fails closed with 503 when D1 counter storage is unavailable", async () => {
+  let executedSql = "";
+  const env = makeEnv({
+    DB: {
+      prepare(sql: string) {
+        executedSql = sql;
+        return { bind() { return {
+          async first() { throw new Error("D1 unavailable"); },
+        }; } };
+      },
+    },
+  });
+  const response = await worker.fetch(new Request("https://omnicore.test/v1/models", {
+    headers: { authorization: "Bearer test-secret-key" },
+  }), env);
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("retry-after"), "5");
+  assert.match(executedSql, /ON CONFLICT\(key_hash, window_start\) DO UPDATE/);
+  assert.match(executedSql, /request_count = request_count \+ 1/);
+  assert.match(executedSql, /RETURNING request_count/);
+  const body = await response.json() as { error: { code: string } };
+  assert.equal(body.error.code, "rate_limit_unavailable");
+});
