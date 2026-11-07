@@ -8,12 +8,13 @@ A separate Cloudflare-native edition. The upstream Next.js/Node application and 
 - `GET /v1/models` — OpenAI-style model list; requires a bearer API key.
 - `POST /v1/chat/completions` — OpenAI-compatible chat endpoint with ordered provider fallback.
 - `GET /v1/keys` — list active key metadata (never plaintext keys); requires the admin bearer key.
-- `POST /v1/keys` — create a managed API key; requires the admin bearer key.
+- `POST /v1/keys` — create a managed API key; requires the admin bearer key. Defaults to a 90-day expiry; `expires_in_days` accepts 1–365.
 - `DELETE /v1/keys/{id}` — revoke a managed API key; requires the admin bearer key.
+- `POST /v1/keys/{id}/rotate` — issue a replacement key and revoke the old key in one D1 batch.
 
 ## Authentication and key lifecycle
 
-Set `OMNICORE_ADMIN_KEY` as a Cloudflare Worker secret. Use it only for key administration. A managed key is generated with 256 bits of cryptographic randomness, shown once, and stored only as a SHA-256 digest in D1. Revoke it immediately if exposed.
+Set `OMNICORE_ADMIN_KEY` as a Cloudflare Worker secret. Use it only for key administration. A managed key is generated with 256 bits of cryptographic randomness, shown once, and stored only as a SHA-256 digest in D1. New keys default to a 90-day expiry; `expires_in_days` accepts 1–365 days. Expired and revoked keys are rejected during authentication. Rotate with `POST /v1/keys/{id}/rotate` (optional JSON `{"expires_in_days":90}`); the replacement is shown once and the previous key is revoked in the same D1 batch. Revoke immediately if exposed.
 
 Example key creation:
 
@@ -73,4 +74,4 @@ GitHub Actions runs the Worker test suite and Wrangler dry-run. The dry-run does
 
 No deployment, D1 creation, secrets, billing activation, or paid service has been performed. `wrangler.toml` contains a placeholder D1 ID and must not be deployed until a real database is provisioned and migrations are applied. Confirm provider pricing/free quotas before use.
 
-This is a hardened development build, not a production certification. Live provider tests, Workers AI streaming, per-tenant quotas/plans, managed key rotation/expiry, live provider tests, scheduled retention behavior in a deployed environment, and deeper D1 integration/concurrency tests remain follow-up work.
+This is a hardened development build, not a production certification. Live provider tests, Workers AI streaming, per-tenant quotas/plans, live provider tests, scheduled retention behavior in a deployed environment, and deeper D1 integration/concurrency tests remain follow-up work.
