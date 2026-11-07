@@ -108,6 +108,14 @@ async function issueApiKey(request: Request, env: Env): Promise<Response> {
   }
 }
 
+async function listApiKeys(request: Request, env: Env): Promise<Response> {
+  if (!(await requireAdmin(request, env))) return json(openAIError("Admin authentication required", "authentication_error", "admin_required"), 401);
+  const result = await env.DB.prepare(
+    "SELECT id, name, created_at FROM api_keys WHERE revoked_at IS NULL ORDER BY created_at DESC LIMIT 500",
+  ).all<{ id: string; name: string; created_at: string }>();
+  return json({ object: "list", data: result.results || [] });
+}
+
 async function revokeApiKey(request: Request, env: Env, id: string): Promise<Response> {
   if (!(await requireAdmin(request, env))) return json(openAIError("Admin authentication required", "authentication_error", "admin_required"), 401);
   const result = await env.DB.prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
@@ -226,11 +234,11 @@ async function callWorkersAI(requestBody: ChatRequest, env: Env): Promise<Respon
   });
 }
 
-async function recordUsage(env: Env, provider: string, model: string, status: number): Promise<void> {
+async function recordUsage(env: Env, provider: string, model: string, status: number, apiKeyId: string): Promise<void> {
   try {
     await env.DB.prepare(
-      "INSERT INTO usage_events (id, provider, model, status, created_at) VALUES (?, ?, ?, ?, ?)",
-    ).bind(crypto.randomUUID(), provider, model, status, new Date().toISOString()).run();
+      "INSERT INTO usage_events (id, provider, model, status, created_at, api_key_id) VALUES (?, ?, ?, ?, ?, ?)",
+    ).bind(crypto.randomUUID(), provider, model, status, new Date().toISOString(), apiKeyId).run();
   } catch (error) {
     console.error("usage persistence failed", error);
   }
@@ -339,7 +347,7 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
         continue;
       }
       await recordProviderResult(env, provider, true);
-      await recordUsage(env, provider, String(body.model || env.DEFAULT_MODEL || DEFAULT_MODEL), response.status);
+      await recordUsage(env, provider, String(body.model || env.DEFAULT_MODEL || DEFAULT_MODEL), response.status, principal.id);
       const headers = new Headers(response.headers);
       headers.set("x-omnicore-provider", provider);
       headers.set("cache-control", "no-store");
@@ -366,6 +374,7 @@ export default {
       return json(modelList(env), 200, cors);
     }
     if (url.pathname === "/v1/keys" && request.method === "POST") return issueApiKey(request, env);
+    if (url.pathname === "/v1/keys" && request.method === "GET") return listApiKeys(request, env);
     const revokeMatch = url.pathname.match(new RegExp("^/v1/keys/([0-9a-f-]+)$"));
     if (revokeMatch && request.method === "DELETE") return revokeApiKey(request, env, revokeMatch[1]);
     if (url.pathname === "/v1/chat/completions" && request.method === "POST") {
