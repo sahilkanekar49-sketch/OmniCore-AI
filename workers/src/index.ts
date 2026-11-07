@@ -7,6 +7,9 @@ export interface Env {
   WORKERS_AI?: Ai;
   FALLBACK_ORDER?: string;
   DEFAULT_MODEL?: string;
+  RATE_LIMIT_REQUESTS?: string;
+  RATE_LIMIT_WINDOW_SECONDS?: string;
+  CORS_ALLOWED_ORIGINS?: string;
 }
 
 type ChatMessage = { role: string; content: unknown };
@@ -19,6 +22,9 @@ type ChatRequest = {
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const DEFAULT_MODEL = "gpt-4o-mini";
+const MAX_BODY_BYTES = 1_048_576;
+const PROVIDER_TIMEOUT_MS = 25_000;
+const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 function json(data: unknown, status = 200, extra: HeadersInit = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -36,11 +42,21 @@ async function sha256(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function constantTimeEqual(a: string, b: string): boolean {
+  const left = new TextEncoder().encode(a);
+  const right = new TextEncoder().encode(b);
+  let difference = left.length ^ right.length;
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i++) difference |= (left[i] || 0) ^ (right[i] || 0);
+  return difference === 0;
+}
+
 async function authorized(request: Request, env: Env): Promise<boolean> {
-  const supplied = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (!supplied || !env.OMNICORE_API_KEY) return false;
-  const [a, b] = await Promise.all([sha256(supplied), sha256(env.OMNICORE_API_KEY)]);
-  return a === b;
+  const header = request.headers.get("authorization") || "";
+  const match = /^Bearer ([^\s]+)$/i.exec(header);
+  if (!match || !env.OMNICORE_API_KEY) return false;
+  const [supplied, expected] = await Promise.all([sha256(match[1]), sha256(env.OMNICORE_API_KEY)]);
+  return constantTimeEqual(supplied, expected);
 }
 
 function configuredProviders(env: Env): string[] {
@@ -50,7 +66,52 @@ function configuredProviders(env: Env): string[] {
   if (env.WORKERS_AI) available.add("workers-ai");
   const requested = (env.FALLBACK_ORDER || "workers-ai,openai,gemini")
     .split(",").map((v) => v.trim().toLowerCase()).filter(Boolean);
-  return [...requested.filter((v) => available.has(v)), ...[...available].filter((v) => !requested.includes(v))];
+  const ordered = requested.filter((v, i) => available.has(v) && requested.indexOf(v) === i);
+  return [...ordered, ...[...available].filter((v) => !ordered.includes(v))];
+}
+
+function corsHeaders(request: Request, env: Env): HeadersInit {
+  const origin = request.headers.get("origin");
+  const allowed = (env.CORS_ALLOWED_ORIGINS || "").split(",").map((v) => v.trim()).filter(Boolean);
+  if (!origin || !allowed.includes(origin)) return { vary: "Origin" };
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-headers": "authorization, content-type",
+    "access-control-max-age": "86400",
+    vary: "Origin",
+  };
+}
+
+async function enforceRateLimit(request: Request, env: Env): Promise<Response | null> {
+  const limit = Math.max(1, Math.min(10_000, Number.parseInt(env.RATE_LIMIT_REQUESTS || "60", 10) || 60));
+  const windowSeconds = Math.max(1, Math.min(86_400, Number.parseInt(env.RATE_LIMIT_WINDOW_SECONDS || "60", 10) || 60));
+  const now = Math.floor(Date.now() / 1000);
+  const windowStart = Math.floor(now / windowSeconds) * windowSeconds;
+  const key = await sha256(env.OMNICORE_API_KEY);
+  try {
+    const row = await env.DB.prepare(
+      "INSERT INTO rate_limit_windows (key_hash, window_start, request_count) VALUES (?, ?, 1) " +
+      "ON CONFLICT(key_hash, window_start) DO UPDATE SET request_count = request_count + 1 " +
+      "RETURNING request_count",
+    ).bind(key, windowStart).first<{ request_count: number }>();
+    if (!row) throw new Error("Rate-limit counter returned no row");
+    if (row.request_count > limit) {
+      const retryAfter = Math.max(1, windowStart + windowSeconds - now);
+      return json(openAIError("Rate limit exceeded. Retry after the current window.", "rate_limit_error", "rate_limit_exceeded"), 429, {
+        "retry-after": String(retryAfter),
+        "x-ratelimit-limit": String(limit),
+        "x-ratelimit-remaining": "0",
+        "x-ratelimit-reset": String(windowStart + windowSeconds),
+      });
+    }
+    return null;
+  } catch (error) {
+    console.error("rate-limit persistence failed", error);
+    return json(openAIError("Rate limiting is temporarily unavailable.", "server_error", "rate_limit_unavailable"), 503, {
+      "retry-after": "5",
+    });
+  }
 }
 
 function modelList(env: Env) {
@@ -75,25 +136,18 @@ async function callOpenAICompatible(
   const model = provider === "gemini" && String(requestBody.model || "").startsWith("gemini-")
     ? requestBody.model
     : provider === "gemini" ? "gemini-2.0-flash" : (requestBody.model || "gpt-4o-mini");
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25_000);
-  try {
-    return await fetch(base.replace(/\/$/, "") + "/chat/completions", {
-      method: "POST",
-      headers: { authorization: "Bearer " + key, "content-type": "application/json" },
-      body: JSON.stringify({ ...requestBody, model }),
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
+  return fetch(base.replace(/\/$/, "") + "/chat/completions", {
+    method: "POST",
+    headers: { authorization: "Bearer " + key, "content-type": "application/json" },
+    body: JSON.stringify({ ...requestBody, model }),
+    signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+  });
 }
 
 async function callWorkersAI(requestBody: ChatRequest, env: Env): Promise<Response> {
   if (!env.WORKERS_AI) throw new Error("Workers AI binding is not configured");
   if (requestBody.stream) throw new Error("Workers AI streaming adapter is not enabled yet");
   const requestedModel = String(requestBody.model || "");
-  // Non-Workers-AI aliases are mapped to the default free-tier Workers AI model.
   const model = requestedModel.startsWith("@cf/") ? requestedModel : "@cf/meta/llama-3.1-8b-instruct";
   const result = await env.WORKERS_AI.run(model as keyof AiModels, {
     messages: requestBody.messages || [],
@@ -125,11 +179,41 @@ async function recordUsage(env: Env, provider: string, model: string, status: nu
   }
 }
 
+function isRetryable(response: Response): boolean {
+  return RETRYABLE_STATUS.has(response.status);
+}
+
+async function attemptProvider(provider: string, body: ChatRequest, env: Env): Promise<Response> {
+  const maxAttempts = 2;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const response = provider === "workers-ai"
+        ? await callWorkersAI(body, env)
+        : await callOpenAICompatible(provider as "openai" | "gemini", body, env);
+      if (!isRetryable(response) || attempt === maxAttempts - 1) return response;
+      await response.body?.cancel();
+    } catch (error) {
+      if (attempt === maxAttempts - 1) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150 * (2 ** attempt)));
+  }
+  throw new Error("Provider retry loop exhausted");
+}
+
 async function handleChat(request: Request, env: Env): Promise<Response> {
   if (!(await authorized(request, env))) return json(openAIError("Invalid API key", "authentication_error", "invalid_api_key"), 401, { "www-authenticate": "Bearer" });
+  const limited = await enforceRateLimit(request, env);
+  if (limited) return limited;
+
+  const declaredLength = Number(request.headers.get("content-length") || 0);
+  if (declaredLength > MAX_BODY_BYTES) return json(openAIError("Request body exceeds 1 MiB", "invalid_request_error", "body_too_large"), 413);
   let body: ChatRequest;
   try {
-    body = await request.json() as ChatRequest;
+    const raw = await request.text();
+    if (new TextEncoder().encode(raw).byteLength > MAX_BODY_BYTES) {
+      return json(openAIError("Request body exceeds 1 MiB", "invalid_request_error", "body_too_large"), 413);
+    }
+    body = JSON.parse(raw) as ChatRequest;
   } catch {
     return json(openAIError("Request body must be valid JSON", "invalid_request_error", "invalid_json"), 400);
   }
@@ -142,12 +226,13 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
   const failures: string[] = [];
   for (const provider of providers) {
     try {
-      const response = provider === "workers-ai"
-        ? await callWorkersAI(body, env)
-        : await callOpenAICompatible(provider as "openai" | "gemini", body, env);
+      const response = await attemptProvider(provider, body, env);
       if (!response.ok) {
-        const detail = (await response.text()).slice(0, 600);
+        const detail = (await response.text()).slice(0, 300);
         failures.push(provider + ": HTTP " + response.status + " " + detail);
+        if (!isRetryable(new Response(null, { status: response.status }))) {
+          return json(openAIError("Provider rejected the request (" + provider + ").", "invalid_request_error", "provider_request_rejected"), response.status);
+        }
         continue;
       }
       await recordUsage(env, provider, String(body.model || env.DEFAULT_MODEL || DEFAULT_MODEL), response.status);
@@ -166,23 +251,21 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: {
-        "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET, POST, OPTIONS",
-        "access-control-allow-headers": "authorization, content-type",
-      }});
-    }
+    const cors = corsHeaders(request, env);
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
     if (url.pathname === "/health" && request.method === "GET") {
-      return json({ status: "ok", service: "OmniCore AI", runtime: "cloudflare-workers" });
+      return json({ status: "ok", service: "OmniCore AI", runtime: "cloudflare-workers" }, 200, cors);
     }
     if (url.pathname === "/v1/models" && request.method === "GET") {
-      if (!(await authorized(request, env))) return json(openAIError("Invalid API key", "authentication_error", "invalid_api_key"), 401);
-      return json(modelList(env));
+      if (!(await authorized(request, env))) return json(openAIError("Invalid API key", "authentication_error", "invalid_api_key"), 401, { ...cors, "www-authenticate": "Bearer" });
+      return json(modelList(env), 200, cors);
     }
     if (url.pathname === "/v1/chat/completions" && request.method === "POST") {
-      return handleChat(request, env);
+      const response = await handleChat(request, env);
+      const headers = new Headers(response.headers);
+      new Headers(cors).forEach((value, key) => headers.set(key, value));
+      return new Response(response.body, { status: response.status, headers });
     }
-    return json(openAIError("Not found", "invalid_request_error", "not_found"), 404);
+    return json(openAIError("Not found", "invalid_request_error", "not_found"), 404, cors);
   },
 };
