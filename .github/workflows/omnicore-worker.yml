@@ -13,6 +13,10 @@ on:
       - ".github/workflows/omnicore-worker.yml"
   workflow_dispatch:
 
+concurrency:
+  group: omnicore-worker-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
