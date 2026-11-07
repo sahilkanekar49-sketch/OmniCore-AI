@@ -15,3 +15,5 @@ migrations_dir = "migrations"
 
 [ai]
 binding = "WORKERS_AI"
+[triggers]
+crons = ["17 * * * *"]
