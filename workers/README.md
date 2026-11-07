@@ -51,9 +51,9 @@ The upstream fetch deadline is 25 seconds. A failure after streaming response he
 
 ## D1 and migrations
 
-Apply migrations in order: `0001_init.sql`, `0002_rate_limits.sql`, `0003_identity_and_circuit_breakers.sql`, `0004_usage_key_attribution.sql`. D1 stores usage metadata (including API-key attribution), hashed API keys, rate-limit counters, and circuit state. Provider secrets and admin credentials must remain Worker secrets, never D1 or Git.
+Apply migrations in order: `0001_init.sql`, `0002_rate_limits.sql`, `0003_identity_and_circuit_breakers.sql`, `0004_usage_key_attribution.sql`. The hourly cleanup trigger is configured in `wrangler.toml` and becomes active only after deployment. D1 stores usage metadata (including API-key attribution), hashed API keys, rate-limit counters, and circuit state. Provider secrets and admin credentials must remain Worker secrets, never D1 or Git.
 
-Old rate-limit windows and revoked key records are retained for audit and storage control; scheduled retention cleanup is not enabled yet.
+An hourly Worker Cron trigger removes rate-limit windows older than 48 hours and stale, closed circuit rows older than 24 hours. Revoked key records and usage events are retained for audit; no automatic deletion is configured for those records.
 
 ## Tests and validation
 
