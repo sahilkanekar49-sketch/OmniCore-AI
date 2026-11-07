@@ -88,6 +88,8 @@ async function requireAdmin(request: Request, env: Env): Promise<boolean> {
 
 async function issueApiKey(request: Request, env: Env): Promise<Response> {
   if (!(await requireAdmin(request, env))) return json(openAIError("Admin authentication required", "authentication_error", "admin_required"), 401);
+  const adminLimit = await enforceRateLimit(request, env, await sha256(env.OMNICORE_ADMIN_KEY || ""));
+  if (adminLimit) return adminLimit;
   let input: { name?: string };
   try { input = await request.json() as { name?: string }; } catch {
     return json(openAIError("Valid JSON body required", "invalid_request_error", "invalid_json"), 400);
@@ -110,6 +112,8 @@ async function issueApiKey(request: Request, env: Env): Promise<Response> {
 
 async function listApiKeys(request: Request, env: Env): Promise<Response> {
   if (!(await requireAdmin(request, env))) return json(openAIError("Admin authentication required", "authentication_error", "admin_required"), 401);
+  const adminLimit = await enforceRateLimit(request, env, await sha256(env.OMNICORE_ADMIN_KEY || ""));
+  if (adminLimit) return adminLimit;
   const result = await env.DB.prepare(
     "SELECT id, name, created_at FROM api_keys WHERE revoked_at IS NULL ORDER BY created_at DESC LIMIT 500",
   ).all<{ id: string; name: string; created_at: string }>();
@@ -118,6 +122,8 @@ async function listApiKeys(request: Request, env: Env): Promise<Response> {
 
 async function revokeApiKey(request: Request, env: Env, id: string): Promise<Response> {
   if (!(await requireAdmin(request, env))) return json(openAIError("Admin authentication required", "authentication_error", "admin_required"), 401);
+  const adminLimit = await enforceRateLimit(request, env, await sha256(env.OMNICORE_ADMIN_KEY || ""));
+  if (adminLimit) return adminLimit;
   const result = await env.DB.prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
     .bind(new Date().toISOString(), id).run();
   if (!result.meta?.changes) return json(openAIError("API key not found or already revoked", "invalid_request_error", "key_not_found"), 404);
@@ -384,7 +390,10 @@ export default {
       return json({ status: "ok", service: "OmniCore AI", runtime: "cloudflare-workers" }, 200, cors);
     }
     if (url.pathname === "/v1/models" && request.method === "GET") {
-      if (!(await authenticate(request, env))) return json(openAIError("Invalid API key", "authentication_error", "invalid_api_key"), 401, { ...cors, "www-authenticate": "Bearer" });
+      const principal = await authenticate(request, env);
+      if (!principal) return json(openAIError("Invalid API key", "authentication_error", "invalid_api_key"), 401, { ...cors, "www-authenticate": "Bearer" });
+      const limited = await enforceRateLimit(request, env, principal.keyHash);
+      if (limited) return limited;
       return json(modelList(env), 200, cors);
     }
     if (url.pathname === "/v1/keys" && request.method === "POST") return issueApiKey(request, env);
