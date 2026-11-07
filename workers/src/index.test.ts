@@ -79,6 +79,25 @@ test("provider fallback proceeds after retryable upstream failures", async () =>
   }
 });
 
+
+test("provider authentication failure falls through to the next configured provider", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    if (calls === 1) return new Response("invalid provider credential", { status: 401 });
+    return Response.json({ id: "fallback-ok", choices: [] });
+  };
+  try {
+    const response = await worker.fetch(chatRequest(), makeEnv());
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-omnicore-provider"), "gemini");
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("provider 400 is not retried or sent to another provider", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
