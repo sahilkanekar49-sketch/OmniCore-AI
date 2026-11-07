@@ -167,6 +167,30 @@ async function listApiKeys(request: Request, env: Env): Promise<Response> {
   }
 }
 
+
+async function providerHealth(request: Request, env: Env): Promise<Response> {
+  if (!(await requireAdmin(request, env))) return json(openAIError("Admin authentication required", "authentication_error", "admin_required"), 401);
+  const adminLimit = await enforceRateLimit(request, env, await sha256(env.OMNICORE_ADMIN_KEY || ""));
+  if (adminLimit) return adminLimit;
+  const providers = configuredProviders(env);
+  if (!providers.length) return json({ object: "list", data: [] });
+  try {
+    const placeholders = providers.map(() => "?").join(", ");
+    const result = await env.DB.prepare("SELECT provider, failure_count, opened_until, last_failure_at FROM provider_circuits WHERE provider IN (" + placeholders + ")")
+      .bind(...providers).all<{ provider: string; failure_count: number; opened_until: number; last_failure_at: number }>();
+    const circuits = new Map((result.results || []).map((row) => [row.provider, row]));
+    const now = Math.floor(Date.now() / 1000);
+    return json({ object: "list", data: providers.map((provider) => {
+      const row = circuits.get(provider);
+      const open = Boolean(row && row.opened_until > now);
+      return { provider, configured: true, circuit: open ? "open" : row && row.failure_count > 0 ? "probe_allowed" : "closed", failure_count: row?.failure_count || 0, opened_until: row?.opened_until || 0, last_failure_at: row?.last_failure_at || null };
+    }) });
+  } catch (error) {
+    console.error("provider health lookup failed", error);
+    return json(openAIError("Provider health is temporarily unavailable.", "server_error", "provider_health_unavailable"), 503, { "retry-after": "5" });
+  }
+}
+
 async function revokeApiKey(request: Request, env: Env, id: string): Promise<Response> {
   if (!(await requireAdmin(request, env))) return json(openAIError("Admin authentication required", "authentication_error", "admin_required"), 401);
   const adminLimit = await enforceRateLimit(request, env, await sha256(env.OMNICORE_ADMIN_KEY || ""));
@@ -306,8 +330,13 @@ function shouldFallback(status: number): boolean {
 }
 
 function retryDelay(response: Response, attempt: number): number {
-  const retryAfter = Number(response.headers.get("retry-after"));
+  const retryHeader = response.headers.get("retry-after");
+  const retryAfter = Number(retryHeader);
   if (Number.isFinite(retryAfter) && retryAfter > 0) return Math.min(1_500, retryAfter * 1_000);
+  if (retryHeader) {
+    const retryDate = Date.parse(retryHeader);
+    if (Number.isFinite(retryDate)) return Math.max(0, Math.min(1_500, retryDate - Date.now()));
+  }
   return 150 * (2 ** attempt);
 }
 
@@ -392,8 +421,8 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
     try {
       const response = await attemptProvider(provider, body, env);
       if (!response.ok) {
-        const detail = (await response.text()).slice(0, 300);
-        failures.push(provider + ": HTTP " + response.status + " " + detail);
+        await response.body?.cancel();
+        failures.push(provider + ": HTTP " + response.status);
         if (!shouldFallback(response.status)) {
           return json(openAIError("Provider rejected the request (" + provider + ").", "invalid_request_error", "provider_request_rejected"), response.status);
         }
@@ -408,7 +437,7 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
       return new Response(response.body, { status: response.status, headers });
     } catch (error) {
       await recordProviderResult(env, provider, false);
-      failures.push(provider + ": " + (error instanceof Error ? error.message : String(error)));
+      failures.push(provider + ": " + (error instanceof Error ? error.name : "unknown_error"));
     }
   }
   console.error("all providers failed", failures);
@@ -445,6 +474,7 @@ export default {
       if (limited) return limited;
       return json(modelList(env), 200, cors);
     }
+    if (url.pathname === "/v1/providers/health" && request.method === "GET") return providerHealth(request, env);
     if (url.pathname === "/v1/keys" && request.method === "POST") return issueApiKey(request, env);
     if (url.pathname === "/v1/keys" && request.method === "GET") return listApiKeys(request, env);
     const rotateMatch = url.pathname.match(new RegExp("^/v1/keys/([0-9a-f-]+)/rotate$"));
