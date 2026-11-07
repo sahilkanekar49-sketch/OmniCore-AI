@@ -183,6 +183,16 @@ function isRetryable(response: Response): boolean {
   return RETRYABLE_STATUS.has(response.status);
 }
 
+function shouldFallback(status: number): boolean {
+  return RETRYABLE_STATUS.has(status) || status === 401 || status === 403 || status === 404;
+}
+
+function retryDelay(response: Response, attempt: number): number {
+  const retryAfter = Number(response.headers.get("retry-after"));
+  if (Number.isFinite(retryAfter) && retryAfter > 0) return Math.min(1_500, retryAfter * 1_000);
+  return 150 * (2 ** attempt);
+}
+
 async function attemptProvider(provider: string, body: ChatRequest, env: Env): Promise<Response> {
   const maxAttempts = 2;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -192,6 +202,8 @@ async function attemptProvider(provider: string, body: ChatRequest, env: Env): P
         : await callOpenAICompatible(provider as "openai" | "gemini", body, env);
       if (!isRetryable(response) || attempt === maxAttempts - 1) return response;
       await response.body?.cancel();
+      await new Promise((resolve) => setTimeout(resolve, retryDelay(response, attempt)));
+      continue;
     } catch (error) {
       if (attempt === maxAttempts - 1) throw error;
     }
@@ -230,7 +242,7 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
       if (!response.ok) {
         const detail = (await response.text()).slice(0, 300);
         failures.push(provider + ": HTTP " + response.status + " " + detail);
-        if (!isRetryable(new Response(null, { status: response.status }))) {
+        if (!shouldFallback(response.status)) {
           return json(openAIError("Provider rejected the request (" + provider + ").", "invalid_request_error", "provider_request_rejected"), response.status);
         }
         continue;
